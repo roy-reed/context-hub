@@ -2,7 +2,9 @@
 
 ## 固定边界
 
-- 第一接入端：ChatGPT Desktop，通过本地 MCP STDIO 启动。
+- 第一目标端仍是 ChatGPT。MVP 先交付客户端无关的本地 MCP STDIO 服务器；截至
+  2026-09-04，ChatGPT 官方接入说明未提供 Desktop 直接启动本地 STDIO 服务器的
+  路径，因此不能把这一产品能力写成已实现或已验收。
 - 首轮数据：仅测试过程中即时生成的合成数据；不得扫描、复制或导入既有记忆、
   用户画像、聊天导出、浏览器资料或其他个人文件。
 - 技术栈：Python 3.11 标准库、SQLite FTS5、官方 Python MCP SDK。
@@ -47,8 +49,9 @@
 python -m unittest discover -s tests -v
 context-hub doctor --data-dir <synthetic-temp-dir>
 context-hub reindex --data-dir <synthetic-temp-dir>
-ChatGPT Desktop MCP tools/list + synthetic put/search/read smoke test
+官方 Python MCP SDK 的本地 STDIO tools/list + synthetic search/read smoke test
 ```
 
-最后一项涉及桌面端本机配置与重启，只在代码、自动测试和配置片段通过后执行。
-
+ChatGPT 侧真实验收须使用当时官方支持的接入面。当前可选路径是 Secure MCP Tunnel，
+它需要外部账号、权限和运行时密钥，属于另行确认的 L2 操作；未经授权不创建隧道、
+不修改 ChatGPT 工作区，也不把本地 SDK 结果替代为 ChatGPT Desktop 结果。
