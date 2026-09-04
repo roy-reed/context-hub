@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,26 @@ from context_hub.mcp_stdio import build_server
 
 
 class MCPContractTest(unittest.IsolatedAsyncioTestCase):
+    def test_library_import_preserves_the_public_mcp_package(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        script = (
+            "import sys; "
+            "import context_hub.mcp_stdio; "
+            "assert 'mcp' not in sys.modules; "
+            "from mcp import ClientSession; "
+            "print(ClientSession.__name__)"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "ClientSession")
+
     async def test_init_can_enable_writes_without_later_disabling_them(self) -> None:
         with tempfile.TemporaryDirectory(prefix="context-hub-mcp-write-config-") as temporary:
             hub = ContextHub(temporary)
@@ -72,6 +93,18 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
             response = hub.search("预算关键词")
             encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.assertLessEqual(len(encoded), 2560)
+
+    async def test_tool_errors_are_structured_and_do_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="context-hub-mcp-errors-") as temporary:
+            server = build_server(temporary, write_enabled=False)
+
+            unknown = await server.call_tool("not_a_tool", {})
+            self.assertTrue(unknown.is_error)
+            self.assertIn("Unknown tool", unknown.content[0].text)
+
+            invalid = await server.call_tool("context_get", {"op": "search", "limit": True})
+            self.assertTrue(invalid.is_error)
+            self.assertIn("limit must be an integer", invalid.content[0].text)
 
     async def test_real_stdio_session_lists_and_calls_context_get(self) -> None:
         with tempfile.TemporaryDirectory(prefix="context-hub-mcp-stdio-") as temporary:

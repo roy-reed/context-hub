@@ -2,58 +2,246 @@
 
 from __future__ import annotations
 
+import importlib
+import json
 import os
+import sys
+from importlib.machinery import ModuleSpec, PathFinder
 from pathlib import Path
-from typing import Any, Literal
-
-from mcp.server.mcpserver import MCPServer
+from types import ModuleType
+from typing import Any
 
 from .hub import ContextHub
+
+
+def _prepare_mcp_namespace() -> None:
+    """Skip MCP's eager convenience imports for the server subprocess.
+
+    MCP 2.1.1 imports its client and every server transport from package
+    \`\`__init__\`\` modules. A STDIO-only process needs neither the client nor
+    the HTTP stack, so expose the installed package paths as namespaces before
+    importing the exact official protocol and transport modules below.
+
+    If another caller has already imported MCP (for example the contract
+    tests), preserve that normal package unchanged.
+    """
+
+    if "mcp" in sys.modules:
+        return
+
+    package_spec = PathFinder.find_spec("mcp")
+    locations = package_spec.submodule_search_locations if package_spec else None
+    if not locations:
+        raise ImportError("The installed 'mcp' package could not be located")
+
+    package_path = Path(next(iter(locations)))
+    mcp_module = ModuleType("mcp")
+    mcp_module.__file__ = str(package_path / "__init__.py")
+    mcp_module.__package__ = "mcp"
+    mcp_module.__path__ = [str(package_path)]
+    mcp_module.__spec__ = ModuleSpec("mcp", loader=None, is_package=True)
+
+    server_path = package_path / "server"
+    server_module = ModuleType("mcp.server")
+    server_module.__file__ = str(server_path / "__init__.py")
+    server_module.__package__ = "mcp.server"
+    server_module.__path__ = [str(server_path)]
+    server_module.__spec__ = ModuleSpec("mcp.server", loader=None, is_package=True)
+
+    sys.modules["mcp"] = mcp_module
+    sys.modules["mcp.server"] = server_module
+    mcp_module.server = server_module
+
+anyio: Any = None
+mcp_types: Any = None
+SessionMessage: Any = None
+stdio_server: Any = None
+HANDSHAKE_PROTOCOL_VERSIONS: tuple[str, ...] = ()
+LATEST_HANDSHAKE_VERSION = ""
+
+
+def _load_mcp_runtime(*, fast_startup: bool) -> None:
+    """Load MCP dependencies, using the narrow path only for the CLI process."""
+    global anyio
+    global mcp_types
+    global SessionMessage
+    global stdio_server
+    global HANDSHAKE_PROTOCOL_VERSIONS
+    global LATEST_HANDSHAKE_VERSION
+
+    if mcp_types is not None:
+        return
+
+    if fast_startup:
+        _prepare_mcp_namespace()
+
+    anyio = importlib.import_module("anyio")
+    mcp_types = importlib.import_module("mcp_types")
+    version_module = importlib.import_module("mcp_types.version")
+    session_module = importlib.import_module("mcp.shared.message")
+    stdio_module = importlib.import_module("mcp.server.stdio")
+    SessionMessage = session_module.SessionMessage
+    stdio_server = stdio_module.stdio_server
+    HANDSHAKE_PROTOCOL_VERSIONS = tuple(version_module.HANDSHAKE_PROTOCOL_VERSIONS)
+    LATEST_HANDSHAKE_VERSION = version_module.LATEST_HANDSHAKE_VERSION
+
+
+INSTRUCTIONS = (
+    "Call context_get only when prior preferences, decisions, constraints, facts, or project status "
+    "materially affect the answer; ordinary standalone questions need no lookup. Search first with "
+    "limit=3 and max_chars=600, then read a stable ref only when the original text is needed. Ignore "
+    "superseded records unless history was explicitly requested. Call context_put only after the user "
+    "explicitly asks for or confirms that exact write. Writes are hidden unless enabled."
+)
+KINDS = {"preference", "decision", "constraint", "fact", "status"}
+
+CONTEXT_GET_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "op": {"type": "string", "enum": ["search", "read", "manifest"]},
+        "query": {"type": ["string", "null"], "default": None},
+        "ref": {"type": ["string", "null"], "default": None},
+        "cursor": {"type": ["string", "null"], "default": None},
+        "project_id": {"type": ["string", "null"], "default": None},
+        "kinds": {
+            "type": ["array", "null"],
+            "items": {"type": "string", "enum": sorted(KINDS)},
+            "default": None,
+        },
+        "limit": {"type": "integer", "default": 3},
+        "max_chars": {"type": "integer", "default": 600},
+        "include_history": {"type": "boolean", "default": False},
+    },
+    "required": ["op"],
+}
+
+CONTEXT_PUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["append", "supersede", "tombstone"]},
+        "kind": {"type": "string", "enum": sorted(KINDS)},
+        "content": {"type": "string"},
+        "source_ref": {"type": "string"},
+        "project_id": {"type": ["string", "null"], "default": None},
+        "supersedes": {"type": ["string", "null"], "default": None},
+        "event_id": {"type": ["string", "null"], "default": None},
+    },
+    "required": ["action", "kind", "content", "source_ref"],
+}
+
+OUTPUT_SCHEMA: dict[str, Any] = {"type": "object", "additionalProperties": True}
 
 
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
-def build_server(
-    data_dir: str | os.PathLike[str] | None = None,
-    *,
-    write_enabled: bool | None = None,
-) -> MCPServer:
-    hub = ContextHub(data_dir)
-    hub.initialize()
-    writes = hub.write_enabled if write_enabled is None else write_enabled
-    if _env_flag("CONTEXT_HUB_WRITE_ENABLED"):
-        writes = True
+def _optional_string(arguments: dict[str, Any], name: str) -> str | None:
+    value = arguments.get(name)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{name} must be a string or null")
+    return value
 
-    server = MCPServer(
-        name="context-hub",
-        title="Context Hub",
-        description="Local-first retrieval over explicit JSONL and Markdown fact sources.",
-        instructions=(
-            "Call context_get only when prior preferences, decisions, constraints, facts, or project status "
-            "materially affect the answer; ordinary standalone questions need no lookup. Search first with "
-            "limit=3 and max_chars=600, then read a stable ref only when the original text is needed. Ignore "
-            "superseded records unless history was explicitly requested. Call context_put only after the user "
-            "explicitly asks for or confirms that exact write. Writes are hidden unless enabled."
-        ),
-        version="0.1.0",
+
+def _required_string(arguments: dict[str, Any], name: str) -> str:
+    if name not in arguments:
+        raise ValueError(f"{name} is required")
+    value = arguments[name]
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    return value
+
+
+def _integer(arguments: dict[str, Any], name: str, default: int) -> int:
+    value = arguments.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    return value
+
+
+def _json_result(payload: dict[str, Any]) -> mcp_types.CallToolResult:
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=text)],
+        structured_content=payload,
+        is_error=False,
     )
 
-    @server.tool(name="context_get", description="Search, read a stable ref, or inspect the public manifest.", structured_output=True)
-    def context_get(
-        op: Literal["search", "read", "manifest"],
-        query: str | None = None,
-        ref: str | None = None,
-        cursor: str | None = None,
-        project_id: str | None = None,
-        kinds: list[Literal["preference", "decision", "constraint", "fact", "status"]] | None = None,
-        limit: int = 3,
-        max_chars: int = 600,
-        include_history: bool = False,
-    ) -> dict[str, Any]:
+
+def _error_result(error: Exception | str) -> mcp_types.CallToolResult:
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=str(error))],
+        is_error=True,
+    )
+
+
+class ContextHubMCPServer:
+    """Small MCP dispatcher over the official protocol types and STDIO transport."""
+
+    def __init__(self, hub: ContextHub, *, writes: bool) -> None:
+        _load_mcp_runtime(fast_startup=False)
+        self.hub = hub
+        self.writes = writes
+        self.instructions = INSTRUCTIONS
+        self._tools = [
+            mcp_types.Tool(
+                name="context_get",
+                description="Search, read a stable ref, or inspect the public manifest.",
+                input_schema=CONTEXT_GET_SCHEMA,
+                output_schema=OUTPUT_SCHEMA,
+            )
+        ]
+        if writes:
+            self._tools.append(
+                mcp_types.Tool(
+                    name="context_put",
+                    description="Append one explicitly confirmed immutable event.",
+                    input_schema=CONTEXT_PUT_SCHEMA,
+                    output_schema=OUTPUT_SCHEMA,
+                )
+            )
+
+        self._initialize_accepted = False
+
+    async def list_tools(self) -> list[mcp_types.Tool]:
+        return list(self._tools)
+
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None) -> mcp_types.CallToolResult:
+        try:
+            values = arguments or {}
+            if not isinstance(values, dict):
+                raise ValueError("tool arguments must be an object")
+            if name == "context_get":
+                return _json_result(self._context_get(values))
+            if name == "context_put" and self.writes:
+                return _json_result(self._context_put(values))
+            raise ValueError(f"Unknown tool: {name}")
+        except Exception as exc:
+            return _error_result(exc)
+
+    def _context_get(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        op = _required_string(arguments, "op")
+        if op not in {"search", "read", "manifest"}:
+            raise ValueError("op must be one of: search, read, manifest")
+
+        query = _optional_string(arguments, "query")
+        ref = _optional_string(arguments, "ref")
+        cursor = _optional_string(arguments, "cursor")
+        project_id = _optional_string(arguments, "project_id")
+        kinds = arguments.get("kinds")
+        if kinds is not None:
+            if not isinstance(kinds, list) or any(
+                not isinstance(kind, str) or kind not in KINDS for kind in kinds
+            ):
+                raise ValueError("kinds must be an array of supported kind names or null")
+        limit = _integer(arguments, "limit", 3)
+        max_chars = _integer(arguments, "max_chars", 600)
+        include_history = arguments.get("include_history", False)
+        if not isinstance(include_history, bool):
+            raise ValueError("include_history must be a boolean")
+
         if op == "search":
-            return hub.search(
+            return self.hub.search(
                 query or "",
                 project_id=project_id,
                 kinds=kinds,
@@ -62,37 +250,163 @@ def build_server(
                 include_history=include_history,
             )
         if op == "read":
-            return hub.read(ref, cursor=cursor, max_chars=max_chars)
-        return hub.manifest()
+            return self.hub.read(ref, cursor=cursor, max_chars=max_chars)
+        return self.hub.manifest()
 
-    if writes:
+    def _context_put(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        action = _required_string(arguments, "action")
+        if action not in {"append", "supersede", "tombstone"}:
+            raise ValueError("action must be one of: append, supersede, tombstone")
+        kind = _required_string(arguments, "kind")
+        if kind not in KINDS:
+            raise ValueError("kind must be a supported kind name")
 
-        @server.tool(name="context_put", description="Append one explicitly confirmed immutable event.", structured_output=True)
-        def context_put(
-            action: Literal["append", "supersede", "tombstone"],
-            kind: Literal["preference", "decision", "constraint", "fact", "status"],
-            content: str,
-            source_ref: str,
-            project_id: str | None = None,
-            supersedes: str | None = None,
-            event_id: str | None = None,
-        ) -> dict[str, Any]:
-            return hub.put(
-                action=action,
-                kind=kind,
-                content=content,
-                project_id=project_id,
-                source_type="mcp",
-                source_ref=source_ref,
-                supersedes=supersedes,
-                event_id=event_id,
-                confirmed=True,
+        return self.hub.put(
+            action=action,
+            kind=kind,
+            content=_required_string(arguments, "content"),
+            project_id=_optional_string(arguments, "project_id"),
+            source_type="mcp",
+            source_ref=_required_string(arguments, "source_ref"),
+            supersedes=_optional_string(arguments, "supersedes"),
+            event_id=_optional_string(arguments, "event_id"),
+            confirmed=True,
+        )
+
+    @staticmethod
+    def _payload(result: Any) -> dict[str, Any]:
+        return result.model_dump(by_alias=True, mode="json", exclude_none=True)
+
+    @staticmethod
+    def _rpc_error(
+        request_id: int | str | None,
+        code: int,
+        message: str,
+        data: Any = None,
+    ) -> mcp_types.JSONRPCError:
+        return mcp_types.JSONRPCError(
+            jsonrpc=mcp_types.JSONRPC_VERSION,
+            id=request_id,
+            error=mcp_types.ErrorData(code=code, message=message, data=data),
+        )
+
+    async def _dispatch_request(
+        self,
+        request: mcp_types.JSONRPCRequest,
+    ) -> mcp_types.JSONRPCResponse | mcp_types.JSONRPCError:
+        try:
+            if request.method == "initialize":
+                params = mcp_types.InitializeRequestParams.model_validate(
+                    request.params or {},
+                    by_name=False,
+                )
+                negotiated = (
+                    params.protocol_version
+                    if params.protocol_version in HANDSHAKE_PROTOCOL_VERSIONS
+                    else LATEST_HANDSHAKE_VERSION
+                )
+                result = mcp_types.InitializeResult(
+                    protocol_version=negotiated,
+                    capabilities=mcp_types.ServerCapabilities(
+                        tools=mcp_types.ToolsCapability(list_changed=False)
+                    ),
+                    server_info=mcp_types.Implementation(
+                        name="context-hub",
+                        title="Context Hub",
+                        version="0.1.0",
+                        description="Local-first retrieval over explicit JSONL and Markdown fact sources.",
+                    ),
+                    instructions=self.instructions,
+                )
+                self._initialize_accepted = True
+            elif request.method == "ping":
+                result = mcp_types.EmptyResult()
+            elif not self._initialize_accepted:
+                return self._rpc_error(
+                    request.id,
+                    mcp_types.INVALID_PARAMS,
+                    "Invalid request parameters",
+                    "",
+                )
+            elif request.method == "tools/list":
+                result = mcp_types.ListToolsResult(tools=await self.list_tools())
+            elif request.method == "tools/call":
+                params = mcp_types.CallToolRequestParams.model_validate(
+                    request.params or {},
+                    by_name=False,
+                )
+                result = await self.call_tool(params.name, params.arguments)
+            else:
+                return self._rpc_error(
+                    request.id,
+                    mcp_types.METHOD_NOT_FOUND,
+                    "Method not found",
+                    request.method,
+                )
+            return mcp_types.JSONRPCResponse(
+                jsonrpc=mcp_types.JSONRPC_VERSION,
+                id=request.id,
+                result=self._payload(result),
+            )
+        except (TypeError, ValueError) as exc:
+            return self._rpc_error(
+                request.id,
+                mcp_types.INVALID_PARAMS,
+                "Invalid request parameters",
+                str(exc),
+            )
+        except Exception as exc:
+            return self._rpc_error(
+                request.id,
+                mcp_types.INTERNAL_ERROR,
+                "Internal error",
+                str(exc),
             )
 
-    return server
+    async def run_stdio_async(self) -> None:
+        async with stdio_server() as (read_stream, write_stream):
+            async with read_stream, write_stream:
+                async for incoming in read_stream:
+                    if isinstance(incoming, Exception):
+                        response: mcp_types.JSONRPCError | None = self._rpc_error(
+                            None,
+                            mcp_types.PARSE_ERROR,
+                            "Parse error",
+                        )
+                    else:
+                        message = incoming.message
+                        response = None
+                        if isinstance(message, mcp_types.JSONRPCRequest):
+                            response = await self._dispatch_request(message)
+                        elif (
+                            isinstance(message, mcp_types.JSONRPCNotification)
+                            and message.method == "notifications/initialized"
+                        ):
+                            self._initialize_accepted = True
+                    if response is not None:
+                        await write_stream.send(SessionMessage(response))
+
+    def run(self, transport: str = "stdio") -> None:
+        if transport != "stdio":
+            raise ValueError("Context Hub only supports the stdio transport")
+        anyio.run(self.run_stdio_async)
+
+
+def build_server(
+    data_dir: str | os.PathLike[str] | None = None,
+    *,
+    write_enabled: bool | None = None,
+) -> ContextHubMCPServer:
+    hub = ContextHub(data_dir)
+    hub.initialize()
+    writes = hub.write_enabled if write_enabled is None else write_enabled
+    if _env_flag("CONTEXT_HUB_WRITE_ENABLED"):
+        writes = True
+    return ContextHubMCPServer(hub, writes=writes)
 
 
 def main() -> None:
+    _load_mcp_runtime(fast_startup=True)
     data_dir = os.environ.get("CONTEXT_HUB_DATA_DIR")
     build_server(Path(data_dir) if data_dir else None).run("stdio")
 

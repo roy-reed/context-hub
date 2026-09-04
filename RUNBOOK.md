@@ -74,7 +74,7 @@ CLI 写入还要求 `--confirm-write`，并必须给出可追溯的 `--source-re
 {
   "mcpServers": {
     "context-hub": {
-      "command": "F:\\gptspace\\context-hub\\.venv\\Scripts\\context-hub-mcp.exe",
+      "command": "C:\\absolute\\context-hub\\.venv\\Scripts\\context-hub-mcp.exe",
       "env": {
         "CONTEXT_HUB_DATA_DIR": "C:\\absolute\\synthetic-data-root"
       }
