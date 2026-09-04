@@ -27,10 +27,10 @@
 执行命令：
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
 ```
 
-结果：25 个测试全部通过，用时 17.390 秒。覆盖的关键不变量包括：
+结果：25 个测试全部通过，用时 18.920 秒。覆盖的关键不变量包括：
 
 1. 四个独立进程各追加 100 条，事实源最终恰好有 400 条有效 JSONL 事件。
 2. 索引写入失败时事件已经 `flush`、`fsync` 并持久化，随后可用
@@ -51,12 +51,31 @@ SQLite 索引改用 WAL + `synchronous=NORMAL`，避免每条事件重复执行�
 锁等待上限同步提高到有界的 120 秒。修复后，四进程各写 100 条的回归连续执行三轮，
 每轮均得到恰好 400 条有效事件，随后完整回归亦通过。
 
+## 运行手册 CLI 对齐验收
+
+执行命令：
+
+```powershell
+pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1 `
+  -Output .context-hub-test-data\runbook-smoke-report-manual-alignment.json
+```
+
+结果：退出码 0，`ok=true`、`synthetic_only=true`、`external_fact_inputs=0`，全部
+62 项检查为 `true`，用时 5344.786 ms。脚本逐条调用手册公开的 CLI，覆盖初始化与
+幂等、默认允许列表、清单、项目检索、9 页稳定 ref/cursor 分页及 SHA-256、显式写入、
+类型过滤、诊断、删除派生 SQLite 后精确重建、稳定 ref/哈希以及权威事实源备份。
+
+本轮首次执行还复现了 Windows PowerShell 旧代码页破坏 CLI Unicode JSON 的问题；
+手册和脚本现已显式设置控制台输入、输出及 Python 为 UTF-8，修正后整条链路通过。
+脚本只在 `.context-hub-test-data/` 下创建唯一目录，验证后删除该目录并保留 JSON 报告；
+`doctor` 精确返回 1 个项目、1 个事件和 2 个章节，备份只含 3 个权威文件。
+
 ## 三项目纯合成验收
 
 执行命令：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_multiproject_acceptance.py `
+.\.venv\Scripts\python.exe -X utf8 scripts\run_multiproject_acceptance.py `
   --output .context-hub-test-data\multiproject-report.json
 ```
 
@@ -73,27 +92,27 @@ SQLite 索引改用 WAL + `synchronous=NORMAL`，避免每条事件重复执行�
   精确返回 3 个项目、5 个事件、11 个章节。
 - 官方 Python MCP SDK 启动本地只读 STDIO 进程，完成
   `manifest → cobalt 项目 search → read`，工具面、内容、来源和哈希全部匹配；该轮
-  全链路用时 774.380 ms。
+  全链路用时 1014.237 ms。
 
 ## 10,000 条性能验收
 
 执行命令：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_acceptance.py `
+.\.venv\Scripts\python.exe -X utf8 scripts\run_acceptance.py `
   --output .context-hub-test-data\acceptance-report-cold-median.json
 ```
 
 | 检查项 | 实测 | 目标 | 结果 |
 | --- | ---: | ---: | --- |
-| 核心搜索 p50（200 次） | 2.536 ms | <= 50 ms | 通过 |
-| 核心搜索 p95（200 次） | 3.032 ms | <= 150 ms | 通过 |
-| 预热 MCP 搜索 p95（40 次） | 5.349 ms | <= 500 ms | 通过 |
-| STDIO 启动并完成 `tools/list`（3 次中位数） | 599.853 ms | <= 1000 ms | 通过 |
+| 核心搜索 p50（200 次） | 3.631 ms | <= 50 ms | 通过 |
+| 核心搜索 p95（200 次） | 5.037 ms | <= 150 ms | 通过 |
+| 预热 MCP 搜索 p95（40 次） | 6.569 ms | <= 500 ms | 通过 |
+| STDIO 启动并完成 `tools/list`（3 次中位数） | 768.602 ms | <= 1000 ms | 通过 |
 | `doctor` 精确计数 | 10,000 / 10,000 | 相等 | 通过 |
 
-补充测量：三次独立的 STDIO 冷启动为 609.141、577.064、599.853 ms；完整重建
-10,000 条索引用时 323.447 ms，核心首次搜索 4.023 ms。
+补充测量：三次独立的 STDIO 冷启动为 789.202、753.177、768.602 ms；完整重建
+10,000 条索引用时 467.302 ms，核心首次搜索 6.578 ms。
 
 使用 Python `-X importtime` 诊断确认，约 1.45 秒主要消耗在 MCP SDK 2.1.1 顶层
 便利包对客户端、HTTP、认证和遥测依赖的提前导入。当前 STDIO 专用进程改为只加载

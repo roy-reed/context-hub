@@ -14,11 +14,17 @@ SQLite FTS5 为可重建索引，并通过 MCP STDIO 暴露最小工具面。
 ## 快速验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e .
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe scripts\run_multiproject_acceptance.py --output .context-hub-test-data\multiproject-report.json
-.\.venv\Scripts\python.exe scripts\run_acceptance.py --output .context-hub-test-data\acceptance-report.json
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock
+.\.venv\Scripts\python.exe -m pip install -e . --no-deps
+pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -X utf8 scripts\run_multiproject_acceptance.py --output .context-hub-test-data\multiproject-report.json
+.\.venv\Scripts\python.exe -X utf8 scripts\run_acceptance.py --output .context-hub-test-data\acceptance-report.json
 ```
+
+PowerShell 冒烟脚本逐条调用手册公开的 CLI，验证初始化、项目注册、清单、检索、稳定
+引用分页、显式写入、诊断、删除派生索引后重建和备份。它只创建唯一的合成测试目录，
+结束后删除该目录并保留忽略的 JSON 报告。
 
 多项目验收会在单个临时目录内生成 3 个彼此隔离的项目，验证固定 Top-3 检索集、
 项目与类型过滤、分页哈希、源文件变更/删除、历史版本、无损重建，以及本地真实

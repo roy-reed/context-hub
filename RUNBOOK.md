@@ -18,9 +18,42 @@
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.lock
 .\.venv\Scripts\python.exe -m pip install -e . --no-deps
+$Utf8NoBom = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = $Utf8NoBom
+[Console]::InputEncoding = $Utf8NoBom
+[Console]::OutputEncoding = $Utf8NoBom
+$env:PYTHONUTF8 = '1'
+```
 
-$ContextHubTestData = Join-Path $PWD '.context-hub-test-data\manual'
+推荐先运行一键手册冒烟。它为每次运行创建唯一的合成目录，完成后删除事实输入，
+只在忽略目录保留 JSON 报告：
+
+```powershell
+pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
+```
+
+若需逐步观察，请在同一终端创建独立的纯合成项目并初始化：
+
+```powershell
+$RunId = [Guid]::NewGuid().ToString('N')
+$ManualRoot = Join-Path $PWD ".context-hub-test-data\manual-$RunId"
+$ContextHubTestData = Join-Path $ManualRoot 'data'
+$SyntheticProject = Join-Path $ManualRoot 'project'
+New-Item -ItemType Directory -Path (Join-Path $SyntheticProject 'context') -Force | Out-Null
+$Padding = (1..80 | ForEach-Object { "synthetic-token-$($_.ToString('D3'))" }) -join ' '
+[IO.File]::WriteAllText(
+  (Join-Path $SyntheticProject 'AGENTS.md'),
+  "# Synthetic Manual Project`n`nmanual-smoke-marker $Padding`n",
+  $Utf8NoBom
+)
+[IO.File]::WriteAllText(
+  (Join-Path $SyntheticProject 'context\notes.md'),
+  "# Synthetic Notes`n`nOnly generated test data is used here.`n",
+  $Utf8NoBom
+)
+
 .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData init
+.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData register-project demo $SyntheticProject
 ```
 
 重复执行 `init` 是幂等的。普通 `init` 不会关闭此前明确启用的写模式。
@@ -30,18 +63,20 @@ $ContextHubTestData = Join-Path $PWD '.context-hub-test-data\manual'
 查看清单、搜索和分页读取：
 
 ```powershell
-.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData manifest
-.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData search '合成检索词'
-.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData read '<稳定 ref>' --max-chars 600
-.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData read --cursor '<上一页 next_cursor>' --max-chars 600
+$Manifest = .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData manifest | ConvertFrom-Json
+$Search = .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData `
+  search 'manual-smoke-marker' --project-id demo | ConvertFrom-Json
+$Ref = [string]$Search.items[0].ref
+$Page = .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData `
+  read $Ref --max-chars 600 | ConvertFrom-Json
+while ($Page.truncated) {
+  $Page = .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData `
+    read --cursor $Page.next_cursor --max-chars 600 | ConvertFrom-Json
+}
 ```
 
 注册项目只接受项目根目录下明确允许的 `AGENTS.md`、`context/*.md` 或命令行
 `--file` 指定的受支持文本文件：
-
-```powershell
-.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData register-project demo C:\absolute\synthetic-project
-```
 
 越界路径、越界符号链接、敏感证书后缀和常见浏览器数据目录会被拒绝。
 
@@ -58,7 +93,10 @@ CLI 写入还要求 `--confirm-write`，并必须给出可追溯的 `--source-re
 ```powershell
 .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData put `
   --confirm-write --action append --kind fact `
-  --content '合成写入样本' --source-ref 'synthetic:manual-smoke'
+  --content 'manual-write-marker' --project-id demo `
+  --source-ref 'synthetic:manual-smoke'
+.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData `
+  search 'manual-write-marker' --project-id demo --kind fact
 ```
 
 要恢复持久只读模式，先断开 MCP 进程，再把数据根目录中 `config.toml` 的
@@ -67,24 +105,27 @@ CLI 写入还要求 `--confirm-write`，并必须给出可追溯的 `--source-re
 
 ## 5. MCP STDIO 启动
 
-能启动本地 STDIO 服务器的 MCP 客户端可使用以下等价配置；占位符必须替换为
-绝对路径，不能依赖客户端替你展开 `%LOCALAPPDATA%`：
+能启动本地 STDIO 服务器的 MCP 客户端需要绝对路径。以下命令根据当前仓库和本轮
+合成数据目录生成可复制的 JSON，不依赖客户端展开环境变量：
 
-```json
-{
-  "mcpServers": {
-    "context-hub": {
-      "command": "C:\\absolute\\context-hub\\.venv\\Scripts\\context-hub-mcp.exe",
-      "env": {
-        "CONTEXT_HUB_DATA_DIR": "C:\\absolute\\synthetic-data-root"
+```powershell
+$McpCommand = (Resolve-Path '.\.venv\Scripts\context-hub-mcp.exe').Path
+$McpConfig = [ordered]@{
+  mcpServers = [ordered]@{
+    'context-hub' = [ordered]@{
+      command = $McpCommand
+      env = [ordered]@{
+        CONTEXT_HUB_DATA_DIR = [IO.Path]::GetFullPath($ContextHubTestData)
       }
     }
   }
 }
+$McpConfig | ConvertTo-Json -Depth 5
 ```
 
 只读启动的 `tools/list` 必须仅返回 `context_get`。本地官方 SDK 的真实 STDIO
-验收由 `tests/test_mcp_contract.py` 执行。ChatGPT 产品侧边界见
+验收由 `tests/test_mcp_contract.py` 和 `scripts/run_multiproject_acceptance.py` 执行。
+ChatGPT 产品侧边界见
 [`docs/chatgpt-client-status.md`](docs/chatgpt-client-status.md)。
 
 ## 6. 诊断、重建与恢复
@@ -93,11 +134,13 @@ CLI 写入还要求 `--confirm-write`，并必须给出可追溯的 `--source-re
 .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData doctor
 .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData doctor --reindex
 .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData reindex
-.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData backup
+$BackupRoot = Join-Path $ManualRoot 'backups'
+.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData `
+  backup --destination $BackupRoot
 ```
 
 - `doctor` 精确核对 JSONL、注册 Markdown、SQLite 普通表与 FTS 表。
-- 索引缺失、损坏或写入返回 `persisted=true, index_status=pending` 时，运行
+- 索引缺失、损坏或写入返回 `status="persisted", index_state="pending_reindex"` 时，运行
   `doctor --reindex`；JSONL 中已落盘的事件无需重写。
 - 备份 ZIP 只包含 `config.toml`、`manifest.json`、`memory/events.jsonl` 和逐文件
   SHA-256 清单，不复制注册项目中的外部 Markdown。
@@ -107,21 +150,23 @@ CLI 写入还要求 `--confirm-write`，并必须给出可追溯的 `--source-re
 ## 7. 验收卡
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe scripts\run_multiproject_acceptance.py `
+pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -X utf8 scripts\run_multiproject_acceptance.py `
   --output .context-hub-test-data\multiproject-report.json
-.\.venv\Scripts\python.exe scripts\run_acceptance.py `
+.\.venv\Scripts\python.exe -X utf8 scripts\run_acceptance.py `
   --output .context-hub-test-data\acceptance-report.json
 ```
 
 验收时逐项记录：
 
-1. 所有输入都来自测试临时目录，未导入既有记忆。
-2. 多项目报告的 `ok` 与 `synthetic_only` 为 `true`，`external_fact_inputs` 为 `0`，
+1. 手册冒烟报告的 `ok` 与 `synthetic_only` 为 `true`，且 `checks` 全部为 `true`。
+2. 所有输入都来自测试临时目录，未导入既有记忆。
+3. 多项目报告的 `ok` 与 `synthetic_only` 为 `true`，`external_fact_inputs` 为 `0`，
    3 个项目的固定检索集 Top-3 召回率不低于 85%，且 `checks` 全部为 `true`。
-3. 单元、并发、故障恢复与真实 SDK STDIO 测试全部通过。
-4. 10,000 条合成事件的核心搜索 p50、p95 和预热 MCP p95 达标。
-5. 三个独立 STDIO 进程的冷启动样本及其中位数是否达到 1 秒目标；不达标时保留
+4. 单元、并发、故障恢复与真实 SDK STDIO 测试全部通过。
+5. 10,000 条合成事件的核心搜索 p50、p95 和预热 MCP p95 达标。
+6. 三个独立 STDIO 进程的冷启动样本及其中位数是否达到 1 秒目标；不达标时保留
    全部测量值和根因，不降低门槛。
-6. 客户端实测的产品名称、版本、接入方式、`tools/list`、search/read 和哈希结果。
-7. 截图或配置存在不能替代真实 MCP 调用；未执行的客户端验收必须标为未验证。
+7. 客户端实测的产品名称、版本、接入方式、`tools/list`、search/read 和哈希结果。
+8. 截图或配置存在不能替代真实 MCP 调用；未执行的客户端验收必须标为未验证。

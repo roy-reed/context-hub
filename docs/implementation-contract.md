@@ -50,10 +50,12 @@
 验收证据：
 
 ```text
-python -m unittest discover -s tests -v
-python scripts/run_multiproject_acceptance.py
-context-hub doctor --data-dir <synthetic-temp-dir>
-context-hub reindex --data-dir <synthetic-temp-dir>
+pwsh -NoLogo -NoProfile -File scripts/run_runbook_smoke.ps1
+python -X utf8 -m unittest discover -s tests -v
+python -X utf8 scripts/run_multiproject_acceptance.py
+python -X utf8 scripts/run_acceptance.py
+context-hub --data-dir <synthetic-temp-dir> doctor
+context-hub --data-dir <synthetic-temp-dir> reindex
 官方 Python MCP SDK 的本地 STDIO tools/list + synthetic search/read smoke test
 ```
 
