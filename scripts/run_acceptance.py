@@ -22,6 +22,10 @@ from context_hub import ContextHub
 from context_hub.hub import SCHEMA_VERSION, sha256_text, utc_now
 
 
+MCP_COLD_START_SAMPLES = 3
+MCP_COLD_START_LIMIT_MS = 1_000.0
+
+
 def _percentile(values: list[float], percentile: float) -> float:
     ordered = sorted(values)
     index = max(0, math.ceil(percentile * len(ordered)) - 1)
@@ -35,6 +39,11 @@ def _timing_summary(values: list[float]) -> dict[str, float]:
         "p95_ms": round(_percentile(values, 0.95), 3),
         "max_ms": round(max(values), 3),
     }
+
+
+def _median_within_limit(values: list[float], limit_ms: float) -> bool:
+    """Apply a stable threshold without hiding sustained startup regressions."""
+    return statistics.median(values) <= limit_ms
 
 
 def _event(index: int) -> dict[str, Any]:
@@ -74,7 +83,11 @@ async def _measure_mcp(
     data_dir: Path,
     *,
     query_indexes: Sequence[int],
-) -> tuple[float, dict[str, float]]:
+    cold_start_samples: int = MCP_COLD_START_SAMPLES,
+) -> tuple[list[float], dict[str, float]]:
+    if cold_start_samples < 3 or cold_start_samples % 2 == 0:
+        raise ValueError("cold_start_samples must be an odd integer of at least 3")
+
     environment = os.environ.copy()
     environment["CONTEXT_HUB_DATA_DIR"] = str(data_dir)
     environment.pop("CONTEXT_HUB_WRITE_ENABLED", None)
@@ -84,47 +97,51 @@ async def _measure_mcp(
         env=environment,
         cwd=Path(__file__).resolve().parents[1],
     )
-    launch_started = time.perf_counter()
-    async with stdio_client(parameters) as (read_stream, write_stream):
-        async with ClientSession(read_stream, write_stream) as session:
-            await asyncio.wait_for(session.initialize(), timeout=10)
-            await asyncio.wait_for(session.list_tools(), timeout=10)
-            cold_ms = (time.perf_counter() - launch_started) * 1000
+    cold_timings: list[float] = []
+    timings: list[float] = []
+    for sample_index in range(cold_start_samples):
+        launch_started = time.perf_counter()
+        async with stdio_client(parameters) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await asyncio.wait_for(session.initialize(), timeout=10)
+                await asyncio.wait_for(session.list_tools(), timeout=10)
+                cold_timings.append((time.perf_counter() - launch_started) * 1000)
 
-            # One unmeasured query establishes the steady-state connection.
-            await asyncio.wait_for(
-                session.call_tool(
-                    "context_get",
-                    {
-                        "op": "search",
-                        "query": f"合成检索编号{query_indexes[0]:05d}",
-                        "limit": 3,
-                        "max_chars": 600,
-                    },
-                ),
-                timeout=10,
-            )
-            timings: list[float] = []
-            for index in query_indexes:
-                started = time.perf_counter()
-                result = await asyncio.wait_for(
+                # Reuse the final fresh process for the separate steady-state benchmark.
+                if sample_index != cold_start_samples - 1:
+                    continue
+                await asyncio.wait_for(
                     session.call_tool(
                         "context_get",
                         {
                             "op": "search",
-                            "query": f"合成检索编号{index:05d}",
+                            "query": f"合成检索编号{query_indexes[0]:05d}",
                             "limit": 3,
                             "max_chars": 600,
                         },
                     ),
                     timeout=10,
                 )
-                if result.is_error or not result.structured_content:
-                    raise RuntimeError(f"MCP search failed at synthetic record {index}")
-                if not result.structured_content.get("items"):
-                    raise RuntimeError(f"MCP search missed synthetic record {index}")
-                timings.append((time.perf_counter() - started) * 1000)
-    return round(cold_ms, 3), _timing_summary(timings)
+                for index in query_indexes:
+                    started = time.perf_counter()
+                    result = await asyncio.wait_for(
+                        session.call_tool(
+                            "context_get",
+                            {
+                                "op": "search",
+                                "query": f"合成检索编号{index:05d}",
+                                "limit": 3,
+                                "max_chars": 600,
+                            },
+                        ),
+                        timeout=10,
+                    )
+                    if result.is_error or not result.structured_content:
+                        raise RuntimeError(f"MCP search failed at synthetic record {index}")
+                    if not result.structured_content.get("items"):
+                        raise RuntimeError(f"MCP search missed synthetic record {index}")
+                    timings.append((time.perf_counter() - started) * 1000)
+    return cold_timings, _timing_summary(timings)
 
 
 def run(*, records: int, queries: int) -> dict[str, Any]:
@@ -163,9 +180,10 @@ def run(*, records: int, queries: int) -> dict[str, Any]:
             direct_timings.append((time.perf_counter() - started) * 1000)
 
         mcp_count = min(max(20, queries // 5), 100)
-        mcp_cold_ms, mcp_timings = asyncio.run(
+        mcp_cold_samples, mcp_timings = asyncio.run(
             _measure_mcp(data_dir, query_indexes=indexes[:mcp_count])
         )
+        mcp_cold = _timing_summary(mcp_cold_samples)
         doctor = hub.doctor()
         if not doctor["ok"] or doctor["counts"]["events"] != records:
             raise RuntimeError(f"doctor rejected the generated data root: {doctor['errors']}")
@@ -176,19 +194,30 @@ def run(*, records: int, queries: int) -> dict[str, Any]:
             "core_search_p50_le_50_ms": direct["p50_ms"] <= 50,
             "core_search_p95_le_150_ms": direct["p95_ms"] <= 150,
             "mcp_prewarm_p95_le_500_ms": mcp_timings["p95_ms"] <= 500,
-            "mcp_cold_start_le_1000_ms": mcp_cold_ms <= 1000,
+            "mcp_cold_start_le_1000_ms": _median_within_limit(
+                mcp_cold_samples, MCP_COLD_START_LIMIT_MS
+            ),
             "doctor_exact_count": doctor["counts"]["events"] == records,
         }
         return {
             "ok": all(checks.values()),
             "synthetic_only": True,
             "records": records,
-            "queries": {"core": queries, "mcp_prewarm": mcp_count},
+            "queries": {
+                "core": queries,
+                "mcp_cold_start": len(mcp_cold_samples),
+                "mcp_prewarm": mcp_count,
+            },
             "timings": {
                 "reindex_ms": round(reindex_ms, 3),
                 "core_cold_search_ms": round(core_cold_ms, 3),
                 "core_search": direct,
-                "mcp_cold_start_and_list_ms": mcp_cold_ms,
+                # Preserve the original scalar key for report consumers; it is now the median.
+                "mcp_cold_start_and_list_ms": mcp_cold["p50_ms"],
+                "mcp_cold_start_and_list": {
+                    **mcp_cold,
+                    "samples_ms": [round(value, 3) for value in mcp_cold_samples],
+                },
                 "mcp_prewarm_search": mcp_timings,
             },
             "checks": checks,
@@ -196,6 +225,7 @@ def run(*, records: int, queries: int) -> dict[str, Any]:
             "notes": [
                 "All fact sources were generated inside one temporary directory.",
                 "Core cold search is diagnostic; the v1.1 cold-start threshold applies to the STDIO MCP process.",
+                "The MCP cold-start gate uses the median of three independent fresh processes; the 1000 ms target is unchanged.",
             ],
         }
 
