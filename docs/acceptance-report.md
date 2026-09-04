@@ -67,6 +67,8 @@ pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1 `
 
 本轮首次执行还复现了 Windows PowerShell 旧代码页破坏 CLI Unicode JSON 的问题；
 手册和脚本现已显式设置控制台输入、输出及 Python 为 UTF-8，修正后整条链路通过。
+首次干净 Windows Runner 又暴露出脚本曾写死仓库 `.venv` 路径；脚本现改为优先仓库
+虚拟环境、否则解析 PATH 中已安装的 CLI，并保留 `-ContextHubCommand` 显式覆盖入口。
 脚本只在 `.context-hub-test-data/` 下创建唯一目录，验证后删除该目录并保留 JSON 报告；
 `doctor` 精确返回 1 个项目、1 个事件和 2 个章节，备份只含 3 个权威文件。
 

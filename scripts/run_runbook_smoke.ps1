@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$Output = ".context-hub-test-data/runbook-smoke-report.json"
+    [string]$Output = ".context-hub-test-data/runbook-smoke-report.json",
+    [string]$ContextHubCommand = ""
 )
 
 Set-StrictMode -Version Latest
@@ -17,7 +18,6 @@ $RunRoot = Join-Path $TestRoot ("runbook-smoke-" + [Guid]::NewGuid().ToString("N
 $DataRoot = Join-Path $RunRoot "data"
 $ProjectRoot = Join-Path $RunRoot "project"
 $BackupRoot = Join-Path $RunRoot "backups"
-$HubExe = Join-Path $RepoRoot ".venv/Scripts/context-hub.exe"
 $OutputPath = if ([IO.Path]::IsPathRooted($Output)) {
     [IO.Path]::GetFullPath($Output)
 } else {
@@ -37,6 +37,37 @@ function Assert-Check {
     $Checks[$Name] = $true
 }
 
+function Resolve-ContextHubCommand {
+    param([string]$Candidate)
+
+    if (-not [string]::IsNullOrWhiteSpace($Candidate)) {
+        if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $Candidate).Path
+        }
+        $ExplicitCommand = Get-Command $Candidate -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $ExplicitCommand) {
+            return [string]$ExplicitCommand.Source
+        }
+        throw "context-hub command was not found: $Candidate"
+    }
+
+    $RepoVenvHub = Join-Path $RepoRoot ".venv/Scripts/context-hub.exe"
+    if (Test-Path -LiteralPath $RepoVenvHub -PathType Leaf) {
+        return (Resolve-Path -LiteralPath $RepoVenvHub).Path
+    }
+
+    $InstalledCommand = Get-Command "context-hub" -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $InstalledCommand) {
+        return [string]$InstalledCommand.Source
+    }
+
+    throw "missing CLI executable; install the project or pass -ContextHubCommand"
+}
+
+$HubExe = Resolve-ContextHubCommand -Candidate $ContextHubCommand
+
 function Invoke-ContextHub {
     param([Parameter(Mandatory)] [string[]]$CliArgs)
 
@@ -51,10 +82,6 @@ function Invoke-ContextHub {
     } catch {
         throw "context-hub returned invalid JSON: $Text"
     }
-}
-
-if (-not (Test-Path -LiteralPath $HubExe -PathType Leaf)) {
-    throw "missing CLI executable; install the project first: $HubExe"
 }
 
 New-Item -ItemType Directory -Path (Join-Path $ProjectRoot "context") -Force | Out-Null

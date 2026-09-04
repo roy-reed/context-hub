@@ -26,7 +26,8 @@ $env:PYTHONUTF8 = '1'
 ```
 
 推荐先运行一键手册冒烟。它为每次运行创建唯一的合成目录，完成后删除事实输入，
-只在忽略目录保留 JSON 报告：
+只在忽略目录保留 JSON 报告。脚本优先使用仓库的 `.venv`，若不存在则使用 PATH 中
+已安装的 `context-hub`（例如 GitHub Actions 的干净 Runner）：
 
 ```powershell
 pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
