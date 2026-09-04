@@ -246,7 +246,10 @@ class ContextHub:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA synchronous=FULL")
+        # JSONL is the fsynced authority. The SQLite index is rebuildable, so
+        # WAL + NORMAL avoids a second full disk flush for every event without
+        # weakening the authoritative write boundary.
+        connection.execute("PRAGMA synchronous=NORMAL")
         if wal:
             connection.execute("PRAGMA journal_mode=WAL")
         return connection

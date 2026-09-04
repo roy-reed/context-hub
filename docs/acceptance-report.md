@@ -30,7 +30,7 @@
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-结果：19 个测试全部通过，用时 18.077 秒。覆盖的关键不变量包括：
+结果：19 个测试全部通过，用时 17.536 秒。覆盖的关键不变量包括：
 
 1. 四个独立进程各追加 100 条，事实源最终恰好有 400 条有效 JSONL 事件。
 2. 索引写入失败时事件已经 `flush`、`fsync` 并持久化，随后可用
@@ -44,24 +44,31 @@
 
 合成测试产物仅允许写入本地忽略目录 `.context-hub-test-data/`，不会提交到仓库。
 
+首次公开仓库 CI 在 GitHub 托管的 Windows Runner 上暴露出旧的 15 秒锁等待窗口不足：
+慢速、受争用的磁盘把四个进程的持久化临界区串行时间拉长，三个写入进程因等待
+`events.lock` 超时而失败。事实源 JSONL 仍逐事件执行 `flush` 和 `fsync`；派生且可重建的
+SQLite 索引改用 WAL + `synchronous=NORMAL`，避免每条事件重复执行一次完整磁盘同步，
+锁等待上限同步提高到有界的 120 秒。修复后，四进程各写 100 条的回归连续执行三轮，
+每轮均得到恰好 400 条有效事件，随后完整 19 项回归亦通过。
+
 ## 10,000 条性能验收
 
 执行命令：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\run_acceptance.py `
-  --output .context-hub-test-data\acceptance-report-final.json
+  --output .context-hub-test-data\acceptance-report-ci-fix.json
 ```
 
 | 检查项 | 实测 | 目标 | 结果 |
 | --- | ---: | ---: | --- |
-| 核心搜索 p50（200 次） | 2.971 ms | <= 50 ms | 通过 |
-| 核心搜索 p95（200 次） | 4.029 ms | <= 150 ms | 通过 |
-| 预热 MCP 搜索 p95（40 次） | 5.813 ms | <= 500 ms | 通过 |
-| STDIO 启动并完成 `tools/list` | 600.135 ms | <= 1000 ms | 通过 |
+| 核心搜索 p50（200 次） | 2.498 ms | <= 50 ms | 通过 |
+| 核心搜索 p95（200 次） | 2.975 ms | <= 150 ms | 通过 |
+| 预热 MCP 搜索 p95（40 次） | 4.880 ms | <= 500 ms | 通过 |
+| STDIO 启动并完成 `tools/list` | 609.309 ms | <= 1000 ms | 通过 |
 | `doctor` 精确计数 | 10,000 / 10,000 | 相等 | 通过 |
 
-补充测量：完整重建 10,000 条索引用时 355.508 ms，核心首次搜索 4.664 ms。
+补充测量：完整重建 10,000 条索引用时 328.513 ms，核心首次搜索 4.470 ms。
 
 使用 Python `-X importtime` 诊断确认，约 1.45 秒主要消耗在 MCP SDK 2.1.1 顶层
 便利包对客户端、HTTP、认证和遥测依赖的提前导入。当前 STDIO 专用进程改为只加载

@@ -11,6 +11,10 @@ from types import TracebackType
 
 _THREAD_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
+# Slow or contended Windows volumes can serialize fsync-heavy writes for more
+# than the original 15-second window. Keep acquisition bounded, but leave
+# enough headroom for the documented four-process workload.
+DEFAULT_LOCK_TIMEOUT_SECONDS = 120.0
 
 
 def _thread_lock(path: Path) -> threading.RLock:
@@ -22,7 +26,12 @@ def _thread_lock(path: Path) -> threading.RLock:
 class ExclusiveFileLock:
     """Advisory one-byte lock with a bounded acquisition timeout."""
 
-    def __init__(self, path: Path, timeout: float = 15.0, poll: float = 0.025):
+    def __init__(
+        self,
+        path: Path,
+        timeout: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
+        poll: float = 0.025,
+    ):
         self.path = path
         self.timeout = timeout
         self.poll = poll
