@@ -1,0 +1,24 @@
+{
+  "policy_version": "openai-bidirectional/1.0",
+  "origin": "local",
+  "score": 7,
+  "route": "local-direct",
+  "reason": "The specification is frozen and already local; a web planning pass would duplicate context transfer without net benefit.",
+  "web_gateway": {
+    "evaluated": true,
+    "selected": false,
+    "max_calls": 0,
+    "required_visible_label_if_selected": "GPT-5.6 Sol High"
+  },
+  "local_target": {
+    "logical_model": "gpt-5.6-terra",
+    "reasoning_effort": "xhigh"
+  },
+  "delegation": {
+    "stage": "planner",
+    "external_reasoner": "deepseek-v4-pro",
+    "max_calls": 1,
+    "implementation_authority": "local-codex",
+    "acceptance_authority": "local-codex"
+  }
+}

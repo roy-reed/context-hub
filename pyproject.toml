@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "context-hub"
+version = "0.1.0"
+description = "Local-first context store with a minimal MCP STDIO adapter"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "mcp==2.1.1",
+]
+
+[project.scripts]
+context-hub = "context_hub.cli:main"
+context-hub-mcp = "context_hub.mcp_stdio:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
