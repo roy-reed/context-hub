@@ -108,6 +108,8 @@ CLI 写入还要求 `--confirm-write`，并必须给出可追溯的 `--source-re
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe scripts\run_multiproject_acceptance.py `
+  --output .context-hub-test-data\multiproject-report.json
 .\.venv\Scripts\python.exe scripts\run_acceptance.py `
   --output .context-hub-test-data\acceptance-report.json
 ```
@@ -115,9 +117,11 @@ CLI 写入还要求 `--confirm-write`，并必须给出可追溯的 `--source-re
 验收时逐项记录：
 
 1. 所有输入都来自测试临时目录，未导入既有记忆。
-2. 单元、并发、故障恢复与真实 SDK STDIO 测试全部通过。
-3. 10,000 条合成事件的核心搜索 p50、p95 和预热 MCP p95 达标。
-4. 三个独立 STDIO 进程的冷启动样本及其中位数是否达到 1 秒目标；不达标时保留
+2. 多项目报告的 `ok` 与 `synthetic_only` 为 `true`，`external_fact_inputs` 为 `0`，
+   3 个项目的固定检索集 Top-3 召回率不低于 85%，且 `checks` 全部为 `true`。
+3. 单元、并发、故障恢复与真实 SDK STDIO 测试全部通过。
+4. 10,000 条合成事件的核心搜索 p50、p95 和预热 MCP p95 达标。
+5. 三个独立 STDIO 进程的冷启动样本及其中位数是否达到 1 秒目标；不达标时保留
    全部测量值和根因，不降低门槛。
-5. 客户端实测的产品名称、版本、接入方式、`tools/list`、search/read 和哈希结果。
-6. 截图或配置存在不能替代真实 MCP 调用；未执行的客户端验收必须标为未验证。
+6. 客户端实测的产品名称、版本、接入方式、`tools/list`、search/read 和哈希结果。
+7. 截图或配置存在不能替代真实 MCP 调用；未执行的客户端验收必须标为未验证。

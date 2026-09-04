@@ -27,6 +27,10 @@
    Windows 大小写变体不能绕过允许列表。
 7. 只读 MCP 不注册写工具；写入失败不损坏此前的事实源。
 8. 稳定引用和游标可继续读取同一版本；派生索引故障返回“已持久化、待重建”。
+9. 三个纯合成项目使用同名章节和各自唯一标记，固定检索集 Top-3 召回率至少 85%，
+   项目过滤与类型过滤不得串扰。
+10. 本地真实 STDIO 必须在只读工具面完成 `manifest → 项目过滤 search → read`，
+    并逐字核对内容、来源与 SHA-256。
 
 既有正确案例：
 
@@ -47,6 +51,7 @@
 
 ```text
 python -m unittest discover -s tests -v
+python scripts/run_multiproject_acceptance.py
 context-hub doctor --data-dir <synthetic-temp-dir>
 context-hub reindex --data-dir <synthetic-temp-dir>
 官方 Python MCP SDK 的本地 STDIO tools/list + synthetic search/read smoke test

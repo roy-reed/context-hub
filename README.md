@@ -16,7 +16,12 @@ SQLite FTS5 为可重建索引，并通过 MCP STDIO 暴露最小工具面。
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe scripts\run_multiproject_acceptance.py --output .context-hub-test-data\multiproject-report.json
 .\.venv\Scripts\python.exe scripts\run_acceptance.py --output .context-hub-test-data\acceptance-report.json
 ```
+
+多项目验收会在单个临时目录内生成 3 个彼此隔离的项目，验证固定 Top-3 检索集、
+项目与类型过滤、分页哈希、源文件变更/删除、历史版本、无损重建，以及本地真实
+STDIO 的 `manifest → search → read`。脚本不读取现有 Context Hub 数据或既有记忆。
 
 安装、只读启动、显式写入、备份恢复和客户端验收步骤见 [`RUNBOOK.md`](RUNBOOK.md)。
