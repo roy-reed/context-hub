@@ -217,6 +217,40 @@ class CoreContractTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.hub.register_project("symlink", project, ["linked.md"])
 
+    def test_invalid_public_argument_types_raise_validation_errors(self) -> None:
+        project = self.base / "invalid-arguments"
+        write_markdown_project(project, title="参数", body="仅用于异常参数测试")
+
+        invalid_calls = {
+            "query": lambda: self.hub.search(None),
+            "project_id": lambda: self.hub.search("参数", project_id=[]),
+            "cursor": lambda: self.hub.read(cursor=[]),
+            "action": lambda: self.hub.put(
+                action=[],
+                kind="fact",
+                content="异常动作类型",
+                source_type="test",
+                source_ref="synthetic:invalid-action",
+                confirmed=True,
+            ),
+            "source_type": lambda: self.hub.put(
+                action="append",
+                kind="fact",
+                content="异常来源类型",
+                source_type=[],
+                source_ref="synthetic:invalid-source",
+                confirmed=True,
+            ),
+            "project_root": lambda: self.hub.register_project("bad-root", 1),
+            "project_files": lambda: self.hub.register_project(
+                "bad-files", project, "AGENTS.md"
+            ),
+        }
+
+        for name, call in invalid_calls.items():
+            with self.subTest(name=name), self.assertRaises(ValidationError):
+                call()
+
 
 if __name__ == "__main__":
     unittest.main()

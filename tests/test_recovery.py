@@ -80,6 +80,76 @@ class RecoveryContractTest(unittest.TestCase):
         self.assertFalse(self.hub.doctor()["ok"])
         self.assertTrue(self.hub.doctor(reindex=True)["ok"])
 
+    def test_initialize_rebuilds_malformed_derived_metadata(self) -> None:
+        event = self.hub.put(
+            action="append",
+            kind="fact",
+            content="派生元数据损坏后的自动恢复样本",
+            source_type="test",
+            source_ref="synthetic:malformed-meta",
+            confirmed=True,
+        )
+        for key, value in (
+            ("events_size", "not-an-integer"),
+            ("events_mtime_ns", "-1"),
+            ("events_sha256", "not-a-sha256"),
+        ):
+            with self.subTest(key=key):
+                with closing(sqlite3.connect(self.hub.index_path)) as connection:
+                    connection.execute("UPDATE meta SET value=? WHERE key=?", (value, key))
+                    connection.commit()
+
+                initialized = self.hub.initialize()
+
+                self.assertTrue(initialized["ok"], initialized)
+                self.assertTrue(self.hub.doctor()["ok"])
+                found = self.hub.search("自动恢复样本")
+                self.assertEqual(found["items"][0]["ref"], f"event:{event['event_id']}")
+
+    def test_doctor_reports_malformed_manifest_shape(self) -> None:
+        self.hub.manifest_path.write_text("[]\n", encoding="utf-8", newline="\n")
+
+        diagnostic = self.hub.doctor()
+
+        self.assertFalse(diagnostic["ok"])
+        self.assertTrue(
+            any("malformed manifest.json" in error for error in diagnostic["errors"]),
+            diagnostic,
+        )
+
+    def test_doctor_reports_malformed_event_field_types(self) -> None:
+        self.hub.put(
+            action="append",
+            kind="fact",
+            content="事件字段类型损坏样本",
+            source_type="test",
+            source_ref="synthetic:malformed-event",
+            confirmed=True,
+        )
+        original = read_jsonl(self.hub.events_path)[0]
+        cases = {
+            "action": [],
+            "kind": {},
+            "project_id": [],
+            "created_at": "not-a-timestamp",
+        }
+
+        for field, value in cases.items():
+            with self.subTest(field=field):
+                damaged = dict(original)
+                damaged[field] = value
+                self.hub.events_path.write_text(
+                    json.dumps(damaged, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                diagnostic = self.hub.doctor()
+                self.assertFalse(diagnostic["ok"])
+                self.assertTrue(
+                    any("event at line 1" in error for error in diagnostic["errors"]),
+                    diagnostic,
+                )
+
     def test_backup_contains_only_authoritative_sources_and_hash_manifest(self) -> None:
         self.hub.put(
             action="append",

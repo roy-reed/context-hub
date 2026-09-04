@@ -109,7 +109,9 @@ def _bounded_int(value: int, *, name: str, minimum: int, maximum: int) -> int:
 
 
 def _validate_project_id(project_id: str | None) -> str | None:
-    if project_id is not None and not PROJECT_ID_RE.fullmatch(project_id):
+    if project_id is not None and (
+        not isinstance(project_id, str) or PROJECT_ID_RE.fullmatch(project_id) is None
+    ):
         raise ValidationError("project_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
     return project_id
 
@@ -132,6 +134,8 @@ def _encode_cursor(payload: dict[str, Any]) -> str:
 
 
 def _decode_cursor(cursor: str) -> dict[str, Any]:
+    if not isinstance(cursor, str) or not cursor:
+        raise ValidationError("invalid read cursor")
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         value = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
@@ -231,10 +235,37 @@ class ContextHub:
         self._require_initialized()
         try:
             value = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValidationError(f"invalid manifest.json: {exc}") from exc
-        if value.get("schema_version") != SCHEMA_VERSION or not isinstance(value.get("projects"), dict):
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_version") != SCHEMA_VERSION
+            or not isinstance(value.get("updated_at"), str)
+            or not isinstance(value.get("projects"), dict)
+        ):
             raise ValidationError("unsupported or malformed manifest.json")
+        for project_id, project in value["projects"].items():
+            try:
+                _validate_project_id(project_id)
+                if not isinstance(project, dict):
+                    raise ValidationError("project entry must be an object")
+                root = project.get("root")
+                if not isinstance(root, str) or not Path(root).is_absolute():
+                    raise ValidationError("project root must be an absolute path")
+                files = project.get("files")
+                if not isinstance(files, list):
+                    raise ValidationError("project files must be a list")
+                seen: set[str] = set()
+                for raw_path in files:
+                    normalized = self._normalize_relative_file(raw_path)
+                    if normalized != raw_path:
+                        raise ValidationError("project file path must be canonical")
+                    folded = normalized.casefold()
+                    if folded in seen:
+                        raise ValidationError("project files contain a duplicate path")
+                    seen.add(folded)
+            except ValidationError as exc:
+                raise ValidationError(f"malformed manifest project {project_id!r}: {exc}") from exc
         return value
 
     def _write_manifest(self, manifest: dict[str, Any]) -> None:
@@ -376,7 +407,14 @@ class ContextHub:
             raise ValidationError(f"event at line {line_no} has an invalid event_id") from exc
         if canonical_event_id != event["event_id"]:
             raise ValidationError(f"event at line {line_no} has a non-canonical event_id")
-        if event["action"] not in ALLOWED_ACTIONS or event["kind"] not in ALLOWED_KINDS:
+        action = event["action"]
+        kind = event["kind"]
+        if (
+            not isinstance(action, str)
+            or action not in ALLOWED_ACTIONS
+            or not isinstance(kind, str)
+            or kind not in ALLOWED_KINDS
+        ):
             raise ValidationError(f"event at line {line_no} has an invalid action or kind")
         try:
             _validate_project_id(event["project_id"])
@@ -390,6 +428,15 @@ class ContextHub:
             raise ValidationError(f"event at line {line_no} tombstone content must be empty")
         if sha256_text(event["content"]) != event["content_sha256"]:
             raise ValidationError(f"event at line {line_no} has a content hash mismatch")
+        created_at = event["created_at"]
+        if not isinstance(created_at, str):
+            raise ValidationError(f"event at line {line_no} has an invalid created_at")
+        try:
+            parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValidationError(f"event at line {line_no} has an invalid created_at") from exc
+        if parsed_created_at.tzinfo is None:
+            raise ValidationError(f"event at line {line_no} created_at must include a timezone")
         if not isinstance(event["source"], dict) or not isinstance(event["source"].get("type"), str):
             raise ValidationError(f"event at line {line_no} has an invalid source")
         source_type = event["source"].get("type")
@@ -439,9 +486,9 @@ class ContextHub:
         self._require_initialized()
         if not confirmed:
             raise ValidationError("write requires explicit confirmation")
-        if action not in ALLOWED_ACTIONS:
+        if not isinstance(action, str) or action not in ALLOWED_ACTIONS:
             raise ValidationError(f"action must be one of {sorted(ALLOWED_ACTIONS)}")
-        if kind not in ALLOWED_KINDS:
+        if not isinstance(kind, str) or kind not in ALLOWED_KINDS:
             raise ValidationError(f"kind must be one of {sorted(ALLOWED_KINDS)}")
         if not isinstance(content, str):
             raise ValidationError("content must be a string")
@@ -452,7 +499,7 @@ class ContextHub:
         if action == "tombstone" and content:
             raise ValidationError("tombstone content must be empty")
         project_id = _validate_project_id(project_id)
-        if not source_type or len(source_type) > 64:
+        if not isinstance(source_type, str) or not source_type or len(source_type) > 64:
             raise ValidationError("source_type must contain 1 to 64 characters")
         if not isinstance(source_ref, str) or not source_ref.strip():
             raise ValidationError("source_ref is required")
@@ -647,11 +694,15 @@ class ContextHub:
     ) -> dict[str, Any]:
         self._require_initialized()
         _validate_project_id(project_id)
+        if not isinstance(root, (str, os.PathLike)):
+            raise ValidationError("project root must be a path")
         resolved_root = Path(root).expanduser().resolve(strict=True)
         if not resolved_root.is_dir():
             raise ValidationError("project root must be a directory")
 
         if files is not None:
+            if not isinstance(files, list):
+                raise ValidationError("files must be a list when supplied")
             requested = list(files)
         else:
             requested = list(DEFAULT_PROJECT_ROOT_FILES)
@@ -847,9 +898,22 @@ class ContextHub:
             }
         if any(row is None for row in stored_events.values()):
             return self._reindex_locked(manifest)
+        try:
+            stored_size = int(stored_events["size"]["value"])
+            stored_mtime_ns = int(stored_events["mtime_ns"]["value"])
+            stored_sha256 = stored_events["sha256"]["value"]
+        except (KeyError, TypeError, ValueError):
+            return self._reindex_locked(manifest)
         if (
-            int(stored_events["size"]["value"]) != current_events["size"]
-            or int(stored_events["mtime_ns"]["value"]) != current_events["mtime_ns"]
+            stored_size < 0
+            or stored_mtime_ns < 0
+            or not isinstance(stored_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", stored_sha256) is None
+        ):
+            return self._reindex_locked(manifest)
+        if (
+            stored_size != current_events["size"]
+            or stored_mtime_ns != current_events["mtime_ns"]
         ):
             return self._reindex_locked(manifest)
 
@@ -1016,6 +1080,8 @@ class ContextHub:
         include_history: bool = False,
     ) -> dict[str, Any]:
         self._require_initialized()
+        if not isinstance(query, str):
+            raise ValidationError("search query must be a string")
         query = query.strip()
         if not query:
             raise ValidationError("search query must not be empty")
