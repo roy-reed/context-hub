@@ -104,7 +104,7 @@ CLI 写入还要求 `--confirm-write`，并必须给出可追溯的 `--source-re
 `write_enabled` 改为 `false`，随后运行 `doctor`。不要设置
 `CONTEXT_HUB_WRITE_ENABLED`；该环境变量会临时强制显示写工具。
 
-## 5. MCP STDIO 启动
+## 5. MCP STDIO 与 Streamable HTTP
 
 能启动本地 STDIO 服务器的 MCP 客户端需要绝对路径。以下命令根据当前仓库和本轮
 合成数据目录生成可复制的 JSON，不依赖客户端展开环境变量：
@@ -126,8 +126,28 @@ $McpConfig | ConvertTo-Json -Depth 5
 
 只读启动的 `tools/list` 必须仅返回 `context_get`。本地官方 SDK 的真实 STDIO
 验收由 `tests/test_mcp_contract.py` 和 `scripts/run_multiproject_acceptance.py` 执行。
-ChatGPT 产品侧边界见
+
+ChatGPT 不能直接启动本地 STDIO 进程。先用下面的命令在回环地址启动相同工具面的
+Streamable HTTP 适配层；默认拒绝非回环监听，并启用 Host/Origin 校验和 1 MiB 请求体
+上限：
+
+```powershell
+$HttpCommand = (Resolve-Path '.\.venv\Scripts\context-hub-mcp-http.exe').Path
+& $HttpCommand --data-dir $ContextHubTestData --host 127.0.0.1 --port 8765 --path /mcp
+```
+
+真实 ChatGPT 接入需要把 `http://127.0.0.1:8765/mcp` 通过受控隧道或反向代理暴露为
+可访问的 HTTPS URL，然后在 ChatGPT 的 Apps/Connectors 开发者模式中添加该 URL。
+代理与 Context Hub 在同机时应继续只监听回环地址；只有明确需要监听非回环接口时才用
+`--allow-public-bind`。若代理保留外部 Host，使用 `--allowed-host` 精确加入该主机名；
+不得使用宽泛通配或把真实记忆暴露在无认证入口。临时验收只用纯合成数据，完成后关闭
+隧道。完整产品侧步骤和当前实测状态见
 [`docs/chatgpt-client-status.md`](docs/chatgpt-client-status.md)。
+
+每次工具结果都包含 `context_hub` 标记，其中 `active`、`status`、`server`、
+`transport`、`operation`、`request_id`、`source_count`、`source_types` 和 `project_ids`
+用于判断请求是否确实经过 Context Hub，以及结果来自哪些事实源；它不暴露正文或本地
+绝对路径。
 
 ## 6. 诊断、重建与恢复
 
@@ -136,8 +156,11 @@ ChatGPT 产品侧边界见
 .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData doctor --reindex
 .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData reindex
 $BackupRoot = Join-Path $ManualRoot 'backups'
-.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData `
-  backup --destination $BackupRoot
+$Backup = .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData `
+  backup --destination $BackupRoot | ConvertFrom-Json
+$RestoreRoot = Join-Path $ManualRoot 'restored'
+.\.venv\Scripts\context-hub.exe restore $Backup.backup --destination $RestoreRoot
+.\.venv\Scripts\context-hub.exe --data-dir $RestoreRoot doctor
 ```
 
 - `doctor` 精确核对 JSONL、注册 Markdown、SQLite 普通表与 FTS 表。
@@ -145,8 +168,11 @@ $BackupRoot = Join-Path $ManualRoot 'backups'
   `doctor --reindex`；JSONL 中已落盘的事件无需重写。
 - 备份 ZIP 只包含 `config.toml`、`manifest.json`、`memory/events.jsonl` 和逐文件
   SHA-256 清单，不复制注册项目中的外部 Markdown。
-- 恢复时先解压到新的空数据根目录，核对 `backup-manifest.json` 中的哈希，再运行
-  `reindex` 和 `doctor`。清单中的外部项目路径必须仍然存在，否则先恢复项目文件。
+- `restore` 只接受不存在的新数据根目录；它在同级临时目录中检查成员集合、路径、类型、
+  大小、压缩比和逐文件 SHA-256，再自动重建索引并通过 `doctor` 后原子落位。任何校验
+  失败都不会创建目标目录。
+- 清单中的注册项目只保存路径，不复制项目 Markdown；外部项目路径必须仍然存在，否则
+  先恢复项目文件。
 
 ## 7. 验收卡
 
@@ -165,9 +191,14 @@ pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
 2. 所有输入都来自测试临时目录，未导入既有记忆。
 3. 多项目报告的 `ok` 与 `synthetic_only` 为 `true`，`external_fact_inputs` 为 `0`，
    3 个项目的固定检索集 Top-3 召回率不低于 85%，且 `checks` 全部为 `true`。
-4. 单元、并发、故障恢复与真实 SDK STDIO 测试全部通过。
+4. 单元、并发、故障恢复与真实 SDK STDIO/Streamable HTTP 测试全部通过。
 5. 10,000 条合成事件的核心搜索 p50、p95 和预热 MCP p95 达标。
 6. 三个独立 STDIO 进程的冷启动样本及其中位数是否达到 1 秒目标；不达标时保留
    全部测量值和根因，不降低门槛。
-7. 客户端实测的产品名称、版本、接入方式、`tools/list`、search/read 和哈希结果。
-8. 截图或配置存在不能替代真实 MCP 调用；未执行的客户端验收必须标为未验证。
+7. 备份只含 3 个权威文件；恢复到新目录后 `doctor` 计数、稳定 ref 与哈希保持一致。
+8. 客户端实测的产品名称、版本、接入方式、`tools/list`、search/read、哈希和
+   `context_hub.transport` 结果。
+9. 截图或配置存在不能替代真实 MCP 调用；未执行的客户端验收必须标为未验证。
+
+Pi / DeepSeek 调度器的独立保护验收、真实提供商与本地故障注入边界见
+[`docs/worker-guard-validation.md`](docs/worker-guard-validation.md)。

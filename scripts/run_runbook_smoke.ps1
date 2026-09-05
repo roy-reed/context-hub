@@ -18,6 +18,7 @@ $RunRoot = Join-Path $TestRoot ("runbook-smoke-" + [Guid]::NewGuid().ToString("N
 $DataRoot = Join-Path $RunRoot "data"
 $ProjectRoot = Join-Path $RunRoot "project"
 $BackupRoot = Join-Path $RunRoot "backups"
+$RestoreRoot = Join-Path $RunRoot "restored"
 $OutputPath = if ([IO.Path]::IsPathRooted($Output)) {
     [IO.Path]::GetFullPath($Output)
 } else {
@@ -69,9 +70,12 @@ function Resolve-ContextHubCommand {
 $HubExe = Resolve-ContextHubCommand -Candidate $ContextHubCommand
 
 function Invoke-ContextHub {
-    param([Parameter(Mandatory)] [string[]]$CliArgs)
+    param(
+        [Parameter(Mandatory)] [string[]]$CliArgs,
+        [string]$DataDirectory = $DataRoot
+    )
 
-    $Raw = & $HubExe --data-dir $DataRoot @CliArgs 2>&1
+    $Raw = & $HubExe --data-dir $DataDirectory @CliArgs 2>&1
     $ExitCode = $LASTEXITCODE
     $Text = (($Raw | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine).Trim()
     if ($ExitCode -ne 0) {
@@ -185,6 +189,25 @@ try {
     $BackupEntries = @($Backup.entries | ForEach-Object { [string]$_.path })
     Assert-Check (($BackupEntries -join ",") -eq "config.toml,manifest.json,memory/events.jsonl") "backup_contains_only_authoritative_files"
 
+    $Restored = Invoke-ContextHub -CliArgs @(
+        "restore", [string]$Backup.backup, "--destination", $RestoreRoot
+    )
+    Assert-Check ($Restored.ok -and $Restored.reindexed) "restore_verifies_and_reindexes"
+    Assert-Check ([string]$Restored.destination -eq [IO.Path]::GetFullPath($RestoreRoot)) "restore_targets_new_data_root"
+    $RestoreDoctor = Invoke-ContextHub -DataDirectory $RestoreRoot -CliArgs @("doctor")
+    Assert-Check ($RestoreDoctor.ok) "restored_doctor_is_clean"
+    Assert-Check (
+        [int]$RestoreDoctor.counts.projects -eq 1 -and
+        [int]$RestoreDoctor.counts.events -eq 1 -and
+        [int]$RestoreDoctor.counts.sections -eq 2
+    ) "restored_counts_match_source"
+    $RestoreSearch = Invoke-ContextHub -DataDirectory $RestoreRoot -CliArgs @("search", $Marker, "--project-id", "demo")
+    $RestoreRead = Invoke-ContextHub -DataDirectory $RestoreRoot -CliArgs @(
+        "read", ([string]$RestoreSearch.items[0].ref), "--max-chars", "200"
+    )
+    Assert-Check ([string]$RestoreSearch.items[0].ref -eq $Ref) "restore_preserves_stable_ref"
+    Assert-Check ([string]$RestoreRead.sha256 -eq $ReadHash) "restore_preserves_content_hash"
+
     $Stopwatch.Stop()
     $Report = [ordered]@{
         ok = $true
@@ -195,10 +218,12 @@ try {
         checks = $Checks
         doctor_counts = $Doctor.counts
         backup_entries = $BackupEntries
+        restored_doctor_counts = $RestoreDoctor.counts
         notes = @(
             "All fact inputs were generated inside one unique ignored test directory.",
             "The unique fixture directory was removed after validation; this report was retained.",
-            "Local MCP STDIO is validated separately by run_multiproject_acceptance.py and the unit suite."
+            "Backup restore was verified into a new data root and rebuilt its derived SQLite index.",
+            "Local MCP STDIO and Streamable HTTP are validated separately by the acceptance and unit suites."
         )
     }
     $Json = $Report | ConvertTo-Json -Depth 8

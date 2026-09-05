@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "context-hub"
 version = "0.1.0"
-description = "Local-first context store with a minimal MCP STDIO adapter"
+description = "Local-first context store with STDIO and Streamable HTTP MCP adapters"
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "mcp==2.1.1",
@@ -14,7 +14,7 @@ dependencies = [
 [project.scripts]
 context-hub = "context_hub.cli:main"
 context-hub-mcp = "context_hub.mcp_stdio:main"
+context-hub-mcp-http = "context_hub.mcp_http:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

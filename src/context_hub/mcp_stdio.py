@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import sys
+import uuid
 from importlib.machinery import ModuleSpec, PathFinder
 from pathlib import Path
 from types import ModuleType
@@ -91,7 +92,9 @@ INSTRUCTIONS = (
     "materially affect the answer; ordinary standalone questions need no lookup. Search first with "
     "limit=3 and max_chars=600, then read a stable ref only when the original text is needed. Ignore "
     "superseded records unless history was explicitly requested. Call context_put only after the user "
-    "explicitly asks for or confirms that exact write. Writes are hidden unless enabled."
+    "explicitly asks for or confirms that exact write. Writes are hidden unless enabled. Every tool "
+    "response includes context_hub.status, transport, request_id, and a bounded source summary so the "
+    "client can show that Context Hub actually ran."
 )
 KINDS = {"preference", "decision", "constraint", "fact", "status"}
 
@@ -168,9 +171,22 @@ def _json_result(payload: dict[str, Any]) -> mcp_types.CallToolResult:
     )
 
 
-def _error_result(error: Exception | str) -> mcp_types.CallToolResult:
+def _error_result(
+    error: Exception | str,
+    *,
+    marker: dict[str, Any] | None = None,
+) -> mcp_types.CallToolResult:
+    payload: dict[str, Any] = {"error": str(error)}
+    if marker is not None:
+        payload["context_hub"] = marker
     return mcp_types.CallToolResult(
-        content=[mcp_types.TextContent(type="text", text=str(error))],
+        content=[
+            mcp_types.TextContent(
+                type="text",
+                text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            )
+        ],
+        structured_content=payload,
         is_error=True,
     )
 
@@ -178,15 +194,19 @@ def _error_result(error: Exception | str) -> mcp_types.CallToolResult:
 class ContextHubMCPServer:
     """Small MCP dispatcher over the official protocol types and STDIO transport."""
 
-    def __init__(self, hub: ContextHub, *, writes: bool) -> None:
+    def __init__(self, hub: ContextHub, *, writes: bool, transport: str = "stdio") -> None:
         _load_mcp_runtime(fast_startup=False)
         self.hub = hub
         self.writes = writes
+        self.transport = transport
         self.instructions = INSTRUCTIONS
         self._tools = [
             mcp_types.Tool(
                 name="context_get",
-                description="Search, read a stable ref, or inspect the public manifest.",
+                description=(
+                    "Search, read a stable ref, or inspect the public manifest. Responses include "
+                    "a context_hub invocation marker and source summary."
+                ),
                 input_schema=CONTEXT_GET_SCHEMA,
                 output_schema=OUTPUT_SCHEMA,
             )
@@ -207,17 +227,102 @@ class ContextHubMCPServer:
         return list(self._tools)
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None) -> mcp_types.CallToolResult:
+        request_id = f"ch_{uuid.uuid4().hex[:12]}"
+        operation = name
         try:
             values = arguments or {}
             if not isinstance(values, dict):
                 raise ValueError("tool arguments must be an object")
             if name == "context_get":
-                return _json_result(self._context_get(values))
+                operation = str(values.get("op", name))
+                payload = self._context_get(values)
+                payload["context_hub"] = self._invocation_marker(
+                    payload,
+                    operation=operation,
+                    request_id=request_id,
+                )
+                return _json_result(payload)
             if name == "context_put" and self.writes:
-                return _json_result(self._context_put(values))
+                operation = str(values.get("action", name))
+                payload = self._context_put(values)
+                payload["context_hub"] = self._invocation_marker(
+                    payload,
+                    operation=operation,
+                    request_id=request_id,
+                    source_types={"mcp"},
+                    project_ids={values["project_id"]} if values.get("project_id") else set(),
+                    source_count=1,
+                )
+                return _json_result(payload)
             raise ValueError(f"Unknown tool: {name}")
         except Exception as exc:
-            return _error_result(exc)
+            marker = self._invocation_marker(
+                {},
+                operation=operation,
+                request_id=request_id,
+                status="error",
+            )
+            return _error_result(exc, marker=marker)
+
+    def _invocation_marker(
+        self,
+        payload: dict[str, Any],
+        *,
+        operation: str,
+        request_id: str,
+        status: str = "invoked",
+        source_types: set[str] | None = None,
+        project_ids: set[str] | None = None,
+        source_count: int | None = None,
+    ) -> dict[str, Any]:
+        """Return a small, client-visible proof that this adapter handled a call."""
+        derived_source_types = set(source_types or ())
+        derived_project_ids = set(project_ids or ())
+        count = 0 if source_count is None else source_count
+
+        items = payload.get("items")
+        candidates = items if isinstance(items, list) else [payload]
+        if source_count is None:
+            count = len(items) if isinstance(items, list) else int(isinstance(payload.get("source"), dict))
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            source = item.get("source")
+            if isinstance(source, dict) and isinstance(source.get("type"), str):
+                derived_source_types.add(source["type"])
+            elif item.get("kind") == "markdown":
+                derived_source_types.add("markdown")
+            project_id = item.get("project_id")
+            if isinstance(project_id, str):
+                derived_project_ids.add(project_id)
+
+        if payload.get("op") == "manifest":
+            projects = payload.get("projects")
+            if isinstance(projects, list):
+                count = sum(
+                    len(project.get("files", []))
+                    for project in projects
+                    if isinstance(project, dict) and isinstance(project.get("files"), list)
+                )
+                if count:
+                    derived_source_types.add("markdown")
+                derived_project_ids.update(
+                    project["project_id"]
+                    for project in projects
+                    if isinstance(project, dict) and isinstance(project.get("project_id"), str)
+                )
+
+        return {
+            "active": True,
+            "status": status,
+            "server": "context-hub",
+            "transport": self.transport,
+            "operation": operation,
+            "request_id": request_id,
+            "source_count": count,
+            "source_types": sorted(derived_source_types),
+            "project_ids": sorted(derived_project_ids),
+        }
 
     def _context_get(self, arguments: dict[str, Any]) -> dict[str, Any]:
         op = _required_string(arguments, "op")
@@ -396,13 +501,14 @@ def build_server(
     data_dir: str | os.PathLike[str] | None = None,
     *,
     write_enabled: bool | None = None,
+    transport: str = "stdio",
 ) -> ContextHubMCPServer:
     hub = ContextHub(data_dir)
     hub.initialize()
     writes = hub.write_enabled if write_enabled is None else write_enabled
     if _env_flag("CONTEXT_HUB_WRITE_ENABLED"):
         writes = True
-    return ContextHubMCPServer(hub, writes=writes)
+    return ContextHubMCPServer(hub, writes=writes, transport=transport)
 
 
 def main() -> None:

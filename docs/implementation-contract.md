@@ -2,9 +2,9 @@
 
 ## 固定边界
 
-- 第一目标端仍是 ChatGPT。MVP 先交付客户端无关的本地 MCP STDIO 服务器；截至
-  2026-09-04，ChatGPT 官方接入说明未提供 Desktop 直接启动本地 STDIO 服务器的
-  路径，因此不能把这一产品能力写成已实现或已验收。
+- 第一目标端仍是 ChatGPT。MVP 同时交付客户端无关的本地 MCP STDIO 与 Streamable
+  HTTP 适配层；ChatGPT 通过可访问的 HTTPS MCP URL 接入，不能把本地协议测试替代为
+  ChatGPT 产品侧真实调用。
 - 首轮数据：仅测试过程中即时生成的合成数据；不得扫描、复制或导入既有记忆、
   用户画像、聊天导出、浏览器资料或其他个人文件。
 - 技术栈：Python 3.11 标准库、SQLite FTS5、官方 Python MCP SDK。
@@ -12,7 +12,8 @@
   可完全重建的派生索引。
 - 默认只读；写入必须由显式启用的写模式和 `context_put` 调用共同触发。
 - MCP 只提供 `context_get`，以及在写模式下才注册的 `context_put`。
-- 不引入本地模型、向量库、Web 服务、文件监视器、容器或公网入口。
+- 不引入本地模型、向量库、文件监视器或容器。HTTP 默认只监听回环地址；公网 HTTPS
+  只允许作为纯合成、短时且可关闭的客户端验收入口，导入真实记忆前必须使用认证入口。
 
 ## 最小评测契约
 
@@ -31,6 +32,10 @@
    项目过滤与类型过滤不得串扰。
 10. 本地真实 STDIO 必须在只读工具面完成 `manifest → 项目过滤 search → read`，
     并逐字核对内容、来源与 SHA-256。
+11. 本地真实 Streamable HTTP 必须完成 initialize、`tools/list`、search/read，并验证
+    Host 防护；每个响应包含 transport、request ID 和有界来源摘要。
+12. 备份只含 3 个权威源文件；恢复必须先校验成员、大小、压缩比和 SHA-256，再在新
+    目录重建索引，校验失败不得留下目标目录或不完整事实源。
 
 既有正确案例：
 
@@ -46,6 +51,7 @@
 - JSONL 追加在独占跨进程锁内完成，并在索引事务前 `flush` 与 `fsync`。
 - 任何索引均可由事实源独立重建。
 - `context_get` 默认响应保持紧凑；正文必须通过稳定引用分页读取。
+- 状态与来源提示只公开类型、数量和项目 ID，不新增绝对路径、正文或凭据泄露面。
 
 验收证据：
 
@@ -57,8 +63,10 @@ python -X utf8 scripts/run_acceptance.py
 context-hub --data-dir <synthetic-temp-dir> doctor
 context-hub --data-dir <synthetic-temp-dir> reindex
 官方 Python MCP SDK 的本地 STDIO tools/list + synthetic search/read smoke test
+官方 Python MCP SDK 的本地 Streamable HTTP initialize + tools/list + search/read smoke test
+context-hub restore <backup.zip> --destination <new-synthetic-data-dir>
 ```
 
-ChatGPT 侧真实验收须使用当时官方支持的接入面。当前可选路径是 Secure MCP Tunnel，
-它需要外部账号、权限和运行时密钥，属于另行确认的 L2 操作；未经授权不创建隧道、
-不修改 ChatGPT 工作区，也不把本地 SDK 结果替代为 ChatGPT Desktop 结果。
+用户已授权为纯合成数据创建临时 HTTPS MCP 入口并接入 ChatGPT Desktop。代理、隧道、
+产品设置和真实调用分别留存证据；运行时密钥不得写入仓库、日志或报告。只有 ChatGPT
+产品界面实际调用并返回预期 `context_hub` 标记，才能记为 Desktop 端到端通过。

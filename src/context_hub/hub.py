@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
+import stat
 import tempfile
 import tomllib
 import uuid
@@ -22,6 +24,11 @@ from .locking import ExclusiveFileLock
 
 
 SCHEMA_VERSION = 1
+BACKUP_SOURCE_PATHS = ("config.toml", "manifest.json", "memory/events.jsonl")
+BACKUP_MANIFEST_PATH = "backup-manifest.json"
+MAX_BACKUP_ENTRY_BYTES = 512 * 1024 * 1024
+MAX_BACKUP_TOTAL_BYTES = 1024 * 1024 * 1024
+MAX_BACKUP_COMPRESSION_RATIO = 1000
 ALLOWED_ACTIONS = frozenset({"append", "supersede", "tombstone"})
 ALLOWED_KINDS = frozenset({"preference", "decision", "constraint", "fact", "status"})
 DEFAULT_PROJECT_ROOT_FILES = ("AGENTS.md",)
@@ -1632,7 +1639,7 @@ class ContextHub:
         destination_dir = Path(destination).expanduser().resolve() if destination else self.backups_dir
         destination_dir.mkdir(parents=True, exist_ok=True)
         backup_path = destination_dir / f"context-hub-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.zip"
-        sources = [self.config_path, self.manifest_path, self.events_path]
+        sources = [self.root / relative for relative in BACKUP_SOURCE_PATHS]
         file_descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{backup_path.name}.", suffix=".tmp", dir=destination_dir
         )
@@ -1653,6 +1660,7 @@ class ContextHub:
                 backup_manifest = {
                     "schema_version": SCHEMA_VERSION,
                     "created_at": utc_now(),
+                    "scope": "authoritative-sources-only",
                     "entries": entries,
                 }
                 with zipfile.ZipFile(
@@ -1675,6 +1683,148 @@ class ContextHub:
             "sha256": sha256_file(backup_path),
             "entries": entries,
         }
+
+    @classmethod
+    def restore(
+        cls,
+        archive_path: str | os.PathLike[str],
+        destination: str | os.PathLike[str],
+    ) -> dict[str, Any]:
+        """Verify an authoritative backup, restore it atomically, and rebuild the index."""
+        backup = Path(archive_path).expanduser().resolve()
+        target = Path(destination).expanduser().resolve()
+        if not backup.is_file():
+            raise NotFoundError(f"backup archive not found: {backup}")
+        if target.exists():
+            raise ValidationError("restore destination must not already exist")
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        expected_members = {*BACKUP_SOURCE_PATHS, BACKUP_MANIFEST_PATH}
+        staged_path = Path(
+            tempfile.mkdtemp(prefix=f".{target.name}.restore-", dir=target.parent)
+        ).resolve()
+        moved = False
+        verified_entries: list[dict[str, Any]] = []
+        try:
+            try:
+                archive = zipfile.ZipFile(backup)
+            except (OSError, zipfile.BadZipFile) as exc:
+                raise ValidationError("backup is not a readable ZIP archive") from exc
+
+            with archive:
+                infos = archive.infolist()
+                names = [info.filename for info in infos]
+                if len(names) != len(set(names)):
+                    raise ValidationError("backup contains duplicate member names")
+                if set(names) != expected_members or len(names) != len(expected_members):
+                    raise ValidationError("backup contains missing or unexpected members")
+                for info in infos:
+                    member = PurePosixPath(info.filename)
+                    if member.is_absolute() or ".." in member.parts or "\\" in info.filename:
+                        raise ValidationError("backup contains an unsafe member path")
+                    if info.flag_bits & 0x1:
+                        raise ValidationError("backup members must not be encrypted")
+                    mode = info.external_attr >> 16
+                    file_type = stat.S_IFMT(mode)
+                    if info.is_dir() or file_type not in (0, stat.S_IFREG):
+                        raise ValidationError("backup members must be regular files")
+                    if info.file_size > MAX_BACKUP_ENTRY_BYTES:
+                        raise ValidationError("backup member exceeds the restore size limit")
+                    if info.file_size and info.compress_size == 0:
+                        raise ValidationError("backup member has an invalid compression size")
+                    if (
+                        info.compress_size
+                        and info.file_size / info.compress_size > MAX_BACKUP_COMPRESSION_RATIO
+                    ):
+                        raise ValidationError("backup member exceeds the compression-ratio limit")
+                if sum(info.file_size for info in infos) > MAX_BACKUP_TOTAL_BYTES:
+                    raise ValidationError("backup exceeds the total restore size limit")
+
+                try:
+                    backup_manifest = json.loads(archive.read(BACKUP_MANIFEST_PATH))
+                except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValidationError("backup manifest is missing or malformed") from exc
+                if not isinstance(backup_manifest, dict):
+                    raise ValidationError("backup manifest must be an object")
+                if backup_manifest.get("schema_version") != SCHEMA_VERSION:
+                    raise ValidationError("unsupported backup schema version")
+                if backup_manifest.get("scope") != "authoritative-sources-only":
+                    raise ValidationError("unsupported backup scope")
+                entries = backup_manifest.get("entries")
+                if not isinstance(entries, list) or len(entries) != len(BACKUP_SOURCE_PATHS):
+                    raise ValidationError("backup manifest entries are incomplete")
+
+                manifest_entries: dict[str, dict[str, Any]] = {}
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        raise ValidationError("backup manifest entry must be an object")
+                    path = entry.get("path")
+                    digest = entry.get("sha256")
+                    byte_count = entry.get("bytes")
+                    if path in manifest_entries:
+                        raise ValidationError("backup manifest contains duplicate paths")
+                    if path not in BACKUP_SOURCE_PATHS:
+                        raise ValidationError("backup manifest contains an unexpected path")
+                    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                        raise ValidationError("backup manifest contains an invalid SHA-256")
+                    if (
+                        isinstance(byte_count, bool)
+                        or not isinstance(byte_count, int)
+                        or not 0 <= byte_count <= MAX_BACKUP_ENTRY_BYTES
+                    ):
+                        raise ValidationError("backup manifest contains an invalid byte count")
+                    manifest_entries[path] = entry
+                if set(manifest_entries) != set(BACKUP_SOURCE_PATHS):
+                    raise ValidationError("backup manifest does not cover authoritative sources exactly")
+
+                for relative in BACKUP_SOURCE_PATHS:
+                    entry = manifest_entries[relative]
+                    restored_file = staged_path.joinpath(*PurePosixPath(relative).parts)
+                    restored_file.parent.mkdir(parents=True, exist_ok=True)
+                    digest = hashlib.sha256()
+                    byte_count = 0
+                    with archive.open(relative) as source, restored_file.open("xb") as output:
+                        while chunk := source.read(1024 * 1024):
+                            byte_count += len(chunk)
+                            if byte_count > MAX_BACKUP_ENTRY_BYTES:
+                                raise ValidationError(
+                                    f"backup member exceeds the restore size limit: {relative}"
+                                )
+                            digest.update(chunk)
+                            output.write(chunk)
+                    if byte_count != entry["bytes"]:
+                        raise ValidationError(f"backup byte count mismatch: {relative}")
+                    if digest.hexdigest() != entry["sha256"]:
+                        raise ValidationError(f"backup SHA-256 mismatch: {relative}")
+                    verified_entries.append(
+                        {"path": relative, "sha256": entry["sha256"], "bytes": entry["bytes"]}
+                    )
+
+            staged_hub = cls(staged_path)
+            staged_hub.initialize()
+            diagnostic = staged_hub.doctor(reindex=True)
+            if not diagnostic["ok"]:
+                raise ValidationError(
+                    "restored authoritative sources failed validation: "
+                    + "; ".join(diagnostic["errors"])
+                )
+            os.replace(staged_path, target)
+            moved = True
+            final_diagnostic = cls(target).doctor()
+            if not final_diagnostic["ok"]:
+                raise ValidationError("restored index failed post-move validation")
+            return {
+                "ok": True,
+                "backup": str(backup),
+                "destination": str(target),
+                "backup_sha256": sha256_file(backup),
+                "entries": verified_entries,
+                "reindexed": True,
+                "doctor": final_diagnostic,
+            }
+        finally:
+            if not moved and staged_path.exists() and staged_path.parent == target.parent:
+                shutil.rmtree(staged_path)
 
     def remove_index_for_test(self) -> None:
         """Test-only helper; callers still have to invoke reindex explicitly."""

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import stat
 from contextlib import closing
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from context_hub import ContextHub
+from context_hub.errors import ValidationError
 
 from tests.helpers import read_jsonl
 
@@ -170,10 +172,152 @@ class RecoveryContractTest(unittest.TestCase):
                 {"config.toml", "manifest.json", "memory/events.jsonl", "backup-manifest.json"},
             )
             manifest = json.loads(archive.read("backup-manifest.json"))
+            self.assertEqual(manifest["scope"], "authoritative-sources-only")
             for entry in manifest["entries"]:
                 payload = archive.read(entry["path"])
                 self.assertEqual(hashlib.sha256(payload).hexdigest(), entry["sha256"])
                 self.assertEqual(len(payload), entry["bytes"])
+
+    def test_backup_excludes_index_backups_and_unapproved_private_files(self) -> None:
+        private_sentinel = b"PRIVATE-SENTINEL-MUST-NOT-LEAVE-DATA-ROOT"
+        (self.hub.root / "private-notes.txt").write_bytes(private_sentinel)
+        (self.hub.backups_dir / "older.zip").write_bytes(private_sentinel)
+        result = self.hub.backup(self.base / "exports")
+
+        with zipfile.ZipFile(result["backup"]) as archive:
+            self.assertNotIn("index.sqlite3", archive.namelist())
+            self.assertNotIn("private-notes.txt", archive.namelist())
+            self.assertNotIn("backups/older.zip", archive.namelist())
+            for name in archive.namelist():
+                self.assertNotIn(private_sentinel, archive.read(name))
+
+    def test_verified_restore_rebuilds_index_and_preserves_stable_refs(self) -> None:
+        event = self.hub.put(
+            action="append",
+            kind="fact",
+            content="恢复后可以检索的纯合成事件",
+            source_type="test",
+            source_ref="synthetic:restore",
+            confirmed=True,
+        )
+        backup = self.hub.backup(self.base / "exports")
+        destination = self.base / "restored"
+
+        result = ContextHub.restore(backup["backup"], destination)
+
+        restored = ContextHub(destination)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["reindexed"])
+        self.assertTrue(restored.index_path.is_file())
+        self.assertTrue(restored.doctor()["ok"])
+        found = restored.search("恢复后可以检索")
+        self.assertEqual(found["items"][0]["ref"], f"event:{event['event_id']}")
+        self.assertEqual(
+            [entry["path"] for entry in result["entries"]],
+            ["config.toml", "manifest.json", "memory/events.jsonl"],
+        )
+
+    def test_restore_rejects_tampering_without_creating_destination(self) -> None:
+        self.hub.put(
+            action="append",
+            kind="fact",
+            content="备份篡改拒绝样本",
+            source_type="test",
+            source_ref="synthetic:restore-tamper",
+            confirmed=True,
+        )
+        original = Path(self.hub.backup(self.base / "exports")["backup"])
+        corrupted = self.base / "corrupted.zip"
+        with zipfile.ZipFile(original) as source, zipfile.ZipFile(
+            corrupted, "w", compression=zipfile.ZIP_DEFLATED
+        ) as target:
+            for info in source.infolist():
+                payload = source.read(info.filename)
+                if info.filename == "memory/events.jsonl":
+                    payload += b"tampered"
+                target.writestr(info.filename, payload)
+
+        destination = self.base / "must-not-exist"
+        with self.assertRaisesRegex(ValidationError, "byte count mismatch"):
+            ContextHub.restore(corrupted, destination)
+        self.assertFalse(destination.exists())
+
+    def test_restore_rejects_unexpected_archive_members(self) -> None:
+        original = Path(self.hub.backup(self.base / "exports")["backup"])
+        unexpected = self.base / "unexpected.zip"
+        with zipfile.ZipFile(original) as source, zipfile.ZipFile(
+            unexpected, "w", compression=zipfile.ZIP_DEFLATED
+        ) as target:
+            for info in source.infolist():
+                target.writestr(info.filename, source.read(info.filename))
+            target.writestr("private/extra.txt", "must be rejected")
+
+        destination = self.base / "unexpected-restore"
+        with self.assertRaisesRegex(ValidationError, "missing or unexpected"):
+            ContextHub.restore(unexpected, destination)
+        self.assertFalse(destination.exists())
+
+    def test_restore_rejects_encrypted_archive_members(self) -> None:
+        original = Path(self.hub.backup(self.base / "exports")["backup"])
+        encrypted = self.base / "encrypted-flag.zip"
+        payload = bytearray(original.read_bytes())
+        for signature, flag_offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+            cursor = 0
+            while (header := payload.find(signature, cursor)) >= 0:
+                flags = int.from_bytes(payload[header + flag_offset : header + flag_offset + 2], "little")
+                payload[header + flag_offset : header + flag_offset + 2] = (flags | 0x1).to_bytes(
+                    2, "little"
+                )
+                cursor = header + len(signature)
+        encrypted.write_bytes(payload)
+
+        destination = self.base / "encrypted-restore"
+        with self.assertRaisesRegex(ValidationError, "must not be encrypted"):
+            ContextHub.restore(encrypted, destination)
+        self.assertFalse(destination.exists())
+
+    def test_restore_rejects_non_regular_archive_members(self) -> None:
+        original = Path(self.hub.backup(self.base / "exports")["backup"])
+        non_regular = self.base / "non-regular.zip"
+        with zipfile.ZipFile(original) as source, zipfile.ZipFile(
+            non_regular, "w", compression=zipfile.ZIP_DEFLATED
+        ) as target:
+            for info in source.infolist():
+                payload = source.read(info.filename)
+                if info.filename == "memory/events.jsonl":
+                    symlink = zipfile.ZipInfo(info.filename, info.date_time)
+                    symlink.create_system = 3
+                    symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+                    symlink.compress_type = zipfile.ZIP_DEFLATED
+                    target.writestr(symlink, payload)
+                else:
+                    target.writestr(info, payload)
+
+        destination = self.base / "non-regular-restore"
+        with self.assertRaisesRegex(ValidationError, "must be regular files"):
+            ContextHub.restore(non_regular, destination)
+        self.assertFalse(destination.exists())
+
+    def test_restore_rejects_wrong_backup_scope(self) -> None:
+        original = Path(self.hub.backup(self.base / "exports")["backup"])
+        wrong_scope = self.base / "wrong-scope.zip"
+        with zipfile.ZipFile(original) as source, zipfile.ZipFile(
+            wrong_scope, "w", compression=zipfile.ZIP_DEFLATED
+        ) as target:
+            for info in source.infolist():
+                payload = source.read(info.filename)
+                if info.filename == "backup-manifest.json":
+                    manifest = json.loads(payload)
+                    manifest["scope"] = "whole-data-root"
+                    payload = (
+                        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+                    ).encode("utf-8")
+                target.writestr(info, payload)
+
+        destination = self.base / "wrong-scope-restore"
+        with self.assertRaisesRegex(ValidationError, "backup scope"):
+            ContextHub.restore(wrong_scope, destination)
+        self.assertFalse(destination.exists())
 
 
 if __name__ == "__main__":
