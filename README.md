@@ -7,7 +7,8 @@ SQLite FTS5 为可重建索引，并通过 MCP STDIO 与 Streamable HTTP 暴露�
 
 当前代码已经用官方 Python MCP SDK 完成本地真实 STDIO、Streamable HTTP 握手、
 `tools/list` 和 `context_get` 调用。ChatGPT 使用可访问的 HTTPS MCP URL，而不是直接
-启动本地 STDIO 进程；产品侧状态、临时纯合成验收入口和人工确认边界记录在
+启动本地 STDIO 进程；当前官方创建与测试入口以 ChatGPT Web 为准。产品侧状态、临时
+纯合成验收入口和人工确认边界记录在
 [`docs/chatgpt-client-status.md`](docs/chatgpt-client-status.md)。
 
 ## 快速验证

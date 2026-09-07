@@ -137,11 +137,14 @@ $HttpCommand = (Resolve-Path '.\.venv\Scripts\context-hub-mcp-http.exe').Path
 ```
 
 真实 ChatGPT 接入需要把 `http://127.0.0.1:8765/mcp` 通过受控隧道或反向代理暴露为
-可访问的 HTTPS URL，然后在 ChatGPT 的 Apps/Connectors 开发者模式中添加该 URL。
+可访问的 HTTPS URL，然后在 ChatGPT Web 的 Apps 开发者模式中添加该 URL。当前官方
+流程只明确保证 Web；如需 Desktop，还要在 Web 创建成功后独立核验 Desktop 可见性和
+真实调用，不能由 Web 或 SDK 结果推断。
 代理与 Context Hub 在同机时应继续只监听回环地址；只有明确需要监听非回环接口时才用
 `--allow-public-bind`。若代理保留外部 Host，使用 `--allowed-host` 精确加入该主机名；
 不得使用宽泛通配或把真实记忆暴露在无认证入口。临时验收只用纯合成数据，完成后关闭
-隧道。完整产品侧步骤和当前实测状态见
+隧道；临时隧道停止后原 URL 即失效，不得复用历史报告中的 URL。完整产品侧步骤和当前
+实测状态见
 [`docs/chatgpt-client-status.md`](docs/chatgpt-client-status.md)。
 
 每次工具结果都包含 `context_hub` 标记，其中 `active`、`status`、`server`、
