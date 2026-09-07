@@ -1,16 +1,16 @@
 # Context Hub MVP 验收报告
 
-验收日期：2026-09-05。
+初始验收日期：2026-09-05；客户端补充验收日期：2026-09-08。
 
 ## 结论
 
-- 功能回归：25/25 通过，包括 Unicode 与哈希分页、FTS5/LIKE 分流、版本替换与
+- 当前功能回归：33/33 通过，包括 Unicode 与哈希分页、FTS5/LIKE 分流、版本替换与
   墓碑、允许列表、四进程并发写入、索引故障恢复、备份、只读工具隐藏，以及官方
-  Python MCP SDK 客户端的真实 STDIO 握手与调用。
+  Python MCP SDK 客户端的真实 STDIO/Streamable HTTP 握手与调用。
 - 性能目标：核心搜索、预热 MCP 搜索和 STDIO 进程冷启动全部通过。
 - 数据边界：所有输入均由测试在临时目录中即时生成；没有访问、注册或导入既有记忆。
-- 客户端边界：未修改 ChatGPT Desktop 或 ChatGPT 工作区配置，也未把本地 SDK
-  验收冒充为 ChatGPT Desktop 端到端验收。
+- 客户端边界：ChatGPT Web 真实端到端已通过；ChatGPT Desktop 尚未独立验证，不能由
+  Web 或本地 SDK 结果推断通过。
 
 性能脚本返回退出码 0，整体报告中的 `ok` 为 `true`；所有检查均使用即时生成的
 合成数据。
@@ -30,7 +30,8 @@
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
 ```
 
-结果：25 个测试全部通过，用时 18.920 秒。覆盖的关键不变量包括：
+初始结果：25 个测试全部通过，用时 18.920 秒。2026-09-08 加入 HTTP MCP、恢复安全和
+结果契约回归后，当前完整测试为 33/33 通过，用时 17.352 秒。覆盖的关键不变量包括：
 
 1. 四个独立进程各追加 100 条，事实源最终恰好有 400 条有效 JSONL 事件。
 2. 索引写入失败时事件已经 `flush`、`fsync` 并持久化，随后可用
@@ -41,6 +42,8 @@
 6. 官方 SDK 客户端真实启动子进程，完成 initialize、`tools/list` 和
    `context_get` search 调用；错误工具参数返回结构化错误且不导致进程崩溃。
 7. 作为库导入 `context_hub.mcp_stdio` 不会替换或破坏官方 `mcp` 公共包。
+8. STDIO 与 Streamable HTTP 的 `tools/list` 均声明实际结果形状的 `outputSchema`；调用
+   返回匹配的 `structuredContent`，完整可写工具面仍不超过 3072 字节预算。
 
 合成测试产物仅允许写入本地忽略目录 `.context-hub-test-data/`，不会提交到仓库。
 
@@ -128,11 +131,31 @@ GitHub 共享 Runner 曾在同一提交的首次执行中同时出现重建索�
 1000 ms 门槛，并在报告中保留全部样本。新增回归分别证明：一个异常高值不会误判，而
 三个样本中多数超过门槛时仍会失败；阈值本身没有降低。
 
+## ChatGPT Web 与 outputSchema 补充验收
+
+2026-09-08，用户在 ChatGPT Web 完成了临时纯合成连接器的创建与真实调用。服务端访问
+日志记录到来自 ChatGPT 的 MCP 请求，用户确认测试完成；固定 marker、项目范围、正文、
+调用来源提示及完整内容 SHA-256 均与自动化基线一致，因此 Web 产品侧端到端判定通过。
+
+网页端给出的“建议添加 `outputSchema`”同时揭示了工具结果契约缺口。修复后：
+
+1. STDIO 与 HTTP 共享 `context_get`/`context_put` 的紧凑输出契约。
+2. `tools/list` 明确暴露 `outputSchema`，成功调用返回与其匹配的 `structuredContent`，并
+   保留文本 JSON 兼容返回。
+3. 本地真实 STDIO、真实 Streamable HTTP 和公网 HTTPS 会话均完成
+   `initialize → tools/list → manifest → search → read`；公网协议版本为 `2025-11-25`，
+   `context_get_output_schema_declared=true`。
+4. 完整回归 33/33 通过，用时 17.352 秒；临时公网端点随后关闭，不保留真实记忆或长期
+   可访问入口。
+
+Web 界面是在修复前报告该建议，因此“建议是否消失”没有被 UI 再次扫描确认；这是显示层
+复核项，不影响已经完成的调用真实性和修复后的协议契约验收。
+
 ## 未覆盖与下一验收点
 
 - 当前 OpenAI 官方文档不提供 ChatGPT Desktop 直接启动本地 STDIO MCP 的接入方式，
   因此 ChatGPT Desktop 原生端到端验收尚未完成。
 - Secure MCP Tunnel 是当前官方的本地或私有 MCP 接入路径，但会创建外部状态并需要
   组织权限、隧道 ID 和运行时密钥；未经用户另行授权未执行。
-- 若继续客户端验收，仍只使用合成数据，并需要在真实 ChatGPT 支持面完成
-  `tools/list`、search、稳定 ref 分页 read 与 SHA-256 对照。
+- 若继续 Desktop 验收，仍只使用合成数据，并需在该客户端实际确认应用可见、调用来源
+  提示、search、稳定 ref 分页 read 与 SHA-256；Web 已完成的结果不能替代这一步。

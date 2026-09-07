@@ -50,6 +50,20 @@ async def verify(
             tool_names = [tool.name for tool in listed.tools]
             if tool_names != ["context_get"]:
                 raise AssertionError(f"read-only endpoint exposed unexpected tools: {tool_names}")
+            output_schema = listed.tools[0].output_schema
+            if not isinstance(output_schema, dict):
+                raise AssertionError("context_get did not declare outputSchema")
+            required = output_schema.get("required")
+            properties = output_schema.get("properties")
+            if not isinstance(required, list) or not {"op", "context_hub"}.issubset(required):
+                raise AssertionError("context_get outputSchema has an incomplete required contract")
+            if not isinstance(properties, dict) or not {
+                "items",
+                "content",
+                "projects",
+                "context_hub",
+            }.issubset(properties):
+                raise AssertionError("context_get outputSchema has incomplete result properties")
 
             manifest_result = await asyncio.wait_for(
                 session.call_tool("context_get", {"op": "manifest"}),
@@ -121,6 +135,7 @@ async def verify(
     checks = {
         "initialized": True,
         "read_only_tool_surface": tool_names == ["context_get"],
+        "context_get_output_schema_declared": True,
         "manifest_project_visible": project_id in project_ids,
         "search_marker_exact": search_marker.get("project_ids") == [project_id],
         "read_content_and_hash_exact": True,

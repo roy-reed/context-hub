@@ -13,6 +13,7 @@ from types import ModuleType
 from typing import Any
 
 from .hub import ContextHub
+from .mcp_contracts import CONTEXT_GET_OUTPUT_SCHEMA, CONTEXT_PUT_OUTPUT_SCHEMA
 
 
 def _prepare_mcp_namespace() -> None:
@@ -132,9 +133,6 @@ CONTEXT_PUT_SCHEMA: dict[str, Any] = {
     "required": ["action", "kind", "content", "source_ref"],
 }
 
-OUTPUT_SCHEMA: dict[str, Any] = {"type": "object", "additionalProperties": True}
-
-
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().casefold() in {"1", "true", "yes", "on"}
 
@@ -208,7 +206,7 @@ class ContextHubMCPServer:
                     "a context_hub invocation marker and source summary."
                 ),
                 input_schema=CONTEXT_GET_SCHEMA,
-                output_schema=OUTPUT_SCHEMA,
+                output_schema=CONTEXT_GET_OUTPUT_SCHEMA,
             )
         ]
         if writes:
@@ -217,7 +215,7 @@ class ContextHubMCPServer:
                     name="context_put",
                     description="Append one explicitly confirmed immutable event.",
                     input_schema=CONTEXT_PUT_SCHEMA,
-                    output_schema=OUTPUT_SCHEMA,
+                    output_schema=CONTEXT_PUT_OUTPUT_SCHEMA,
                 )
             )
 

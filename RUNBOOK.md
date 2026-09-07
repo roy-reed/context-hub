@@ -124,8 +124,9 @@ $McpConfig = [ordered]@{
 $McpConfig | ConvertTo-Json -Depth 5
 ```
 
-只读启动的 `tools/list` 必须仅返回 `context_get`。本地官方 SDK 的真实 STDIO
-验收由 `tests/test_mcp_contract.py` 和 `scripts/run_multiproject_acceptance.py` 执行。
+只读启动的 `tools/list` 必须仅返回 `context_get`，并为其声明实际结果形状的
+`outputSchema`。本地官方 SDK 的真实 STDIO 验收由 `tests/test_mcp_contract.py` 和
+`scripts/run_multiproject_acceptance.py` 执行。
 
 ChatGPT 不能直接启动本地 STDIO 进程。先用下面的命令在回环地址启动相同工具面的
 Streamable HTTP 适配层；默认拒绝非回环监听，并启用 Host/Origin 校验和 1 MiB 请求体
@@ -150,7 +151,8 @@ $HttpCommand = (Resolve-Path '.\.venv\Scripts\context-hub-mcp-http.exe').Path
 每次工具结果都包含 `context_hub` 标记，其中 `active`、`status`、`server`、
 `transport`、`operation`、`request_id`、`source_count`、`source_types` 和 `project_ids`
 用于判断请求是否确实经过 Context Hub，以及结果来自哪些事实源；它不暴露正文或本地
-绝对路径。
+绝对路径。成功调用的 `structuredContent` 必须匹配 `tools/list` 中对应的
+`outputSchema`；同时保留等价文本 JSON，以兼容尚未消费结构化结果的客户端。
 
 ## 6. 诊断、重建与恢复
 
@@ -194,13 +196,14 @@ pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
 2. 所有输入都来自测试临时目录，未导入既有记忆。
 3. 多项目报告的 `ok` 与 `synthetic_only` 为 `true`，`external_fact_inputs` 为 `0`，
    3 个项目的固定检索集 Top-3 召回率不低于 85%，且 `checks` 全部为 `true`。
-4. 单元、并发、故障恢复与真实 SDK STDIO/Streamable HTTP 测试全部通过。
+4. 单元、并发、故障恢复与真实 SDK STDIO/Streamable HTTP 测试全部通过；两个传输层的
+   `outputSchema` 一致，调用返回匹配的 `structuredContent`。
 5. 10,000 条合成事件的核心搜索 p50、p95 和预热 MCP p95 达标。
 6. 三个独立 STDIO 进程的冷启动样本及其中位数是否达到 1 秒目标；不达标时保留
    全部测量值和根因，不降低门槛。
 7. 备份只含 3 个权威文件；恢复到新目录后 `doctor` 计数、稳定 ref 与哈希保持一致。
-8. 客户端实测的产品名称、版本、接入方式、`tools/list`、search/read、哈希和
-   `context_hub.transport` 结果。
+8. 客户端实测的产品名称、版本、接入方式、`tools/list`（含 `outputSchema`）、
+   search/read、哈希和 `context_hub.transport` 结果。
 9. 截图或配置存在不能替代真实 MCP 调用；未执行的客户端验收必须标为未验证。
 
 Pi / DeepSeek 调度器的独立保护验收、真实提供商与本地故障注入边界见

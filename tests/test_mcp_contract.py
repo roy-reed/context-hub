@@ -15,6 +15,8 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from context_hub import ContextHub
+from context_hub.mcp_http import build_http_server
+from context_hub.mcp_contracts import CONTEXT_GET_OUTPUT_SCHEMA, CONTEXT_PUT_OUTPUT_SCHEMA
 from context_hub.mcp_stdio import build_server
 
 
@@ -55,6 +57,7 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
             readonly = build_server(temporary, write_enabled=False)
             tools = await readonly.list_tools()
             self.assertEqual([tool.name for tool in tools], ["context_get"])
+            self.assertEqual(tools[0].output_schema, CONTEXT_GET_OUTPUT_SCHEMA)
             schema_bytes = len(
                 json.dumps(
                     [tool.model_dump(mode="json", by_alias=True) for tool in tools],
@@ -71,6 +74,8 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
             writable = build_server(temporary, write_enabled=True)
             writable_tools = await writable.list_tools()
             self.assertEqual([tool.name for tool in writable_tools], ["context_get", "context_put"])
+            self.assertEqual(writable_tools[0].output_schema, CONTEXT_GET_OUTPUT_SCHEMA)
+            self.assertEqual(writable_tools[1].output_schema, CONTEXT_PUT_OUTPUT_SCHEMA)
             writable_schema_bytes = len(
                 json.dumps(
                     [tool.model_dump(mode="json", by_alias=True) for tool in writable_tools],
@@ -79,6 +84,20 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
                 ).encode("utf-8")
             )
             self.assertLessEqual(writable_schema_bytes, 3072)
+
+            http, _ = build_http_server(temporary, write_enabled=True)
+            http_tools = await http.list_tools()
+            self.assertEqual([tool.name for tool in http_tools], ["context_get", "context_put"])
+            self.assertEqual(http_tools[0].output_schema, CONTEXT_GET_OUTPUT_SCHEMA)
+            self.assertEqual(http_tools[1].output_schema, CONTEXT_PUT_OUTPUT_SCHEMA)
+            http_schema_bytes = len(
+                json.dumps(
+                    [tool.model_dump(mode="json", by_alias=True) for tool in http_tools],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            self.assertLessEqual(http_schema_bytes, 3072)
 
     async def test_default_search_response_stays_under_budget(self) -> None:
         with tempfile.TemporaryDirectory(prefix="context-hub-mcp-response-") as temporary:
@@ -136,6 +155,7 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(session.initialize(), timeout=10)
                     tools = await asyncio.wait_for(session.list_tools(), timeout=10)
                     self.assertEqual([tool.name for tool in tools.tools], ["context_get"])
+                    self.assertEqual(tools.tools[0].output_schema, CONTEXT_GET_OUTPUT_SCHEMA)
                     result = await asyncio.wait_for(
                         session.call_tool(
                             "context_get",
@@ -204,6 +224,7 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(session.initialize(), timeout=10)
                         tools = await asyncio.wait_for(session.list_tools(), timeout=10)
                         self.assertEqual([tool.name for tool in tools.tools], ["context_get"])
+                        self.assertEqual(tools.tools[0].output_schema, CONTEXT_GET_OUTPUT_SCHEMA)
                         result = await asyncio.wait_for(
                             session.call_tool(
                                 "context_get",

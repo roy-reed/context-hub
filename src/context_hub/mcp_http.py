@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import ipaddress
 import os
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Annotated, Any, Literal, Sequence
 
 from mcp_types import CallToolResult
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import RootModel
 
 from . import __version__
+from .mcp_contracts import CONTEXT_GET_OUTPUT_SCHEMA, CONTEXT_PUT_OUTPUT_SCHEMA
 from .mcp_stdio import INSTRUCTIONS, ContextHubMCPServer, build_server
 
 
@@ -20,6 +23,18 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_PATH = "/mcp"
 DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024
+
+
+class _ContextGetOutput(RootModel[dict[str, Any]]):
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema: Any, handler: Any) -> dict[str, Any]:
+        return deepcopy(CONTEXT_GET_OUTPUT_SCHEMA)
+
+
+class _ContextPutOutput(RootModel[dict[str, Any]]):
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema: Any, handler: Any) -> dict[str, Any]:
+        return deepcopy(CONTEXT_PUT_OUTPUT_SCHEMA)
 
 
 def _is_loopback(host: str) -> bool:
@@ -93,7 +108,7 @@ def build_http_server(
             "Search, read a stable ref, or inspect the public manifest. Every response includes "
             "context_hub status, transport, request id, and source summary."
         ),
-        structured_output=False,
+        structured_output=True,
     )
     async def context_get(
         op: Literal["search", "read", "manifest"],
@@ -105,7 +120,7 @@ def build_http_server(
         limit: int = 3,
         max_chars: int = 600,
         include_history: bool = False,
-    ) -> CallToolResult:
+    ) -> Annotated[CallToolResult, _ContextGetOutput]:
         return await dispatcher.call_tool(
             "context_get",
             {
@@ -126,7 +141,7 @@ def build_http_server(
         @server.tool(
             name="context_put",
             description="Append one explicitly confirmed immutable event and report its source.",
-            structured_output=False,
+            structured_output=True,
         )
         async def context_put(
             action: Literal["append", "supersede", "tombstone"],
@@ -136,7 +151,7 @@ def build_http_server(
             project_id: str | None = None,
             supersedes: str | None = None,
             event_id: str | None = None,
-        ) -> CallToolResult:
+        ) -> Annotated[CallToolResult, _ContextPutOutput]:
             return await dispatcher.call_tool(
                 "context_put",
                 {
