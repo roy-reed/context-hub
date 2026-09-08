@@ -104,43 +104,67 @@ CLI 写入还要求 `--confirm-write`，并必须给出可追溯的 `--source-re
 `write_enabled` 改为 `false`，随后运行 `doctor`。不要设置
 `CONTEXT_HUB_WRITE_ENABLED`；该环境变量会临时强制显示写工具。
 
-## 5. MCP STDIO 与 Streamable HTTP
+## 5. ChatGPT Desktop、MCP STDIO 与 Streamable HTTP
 
-能启动本地 STDIO 服务器的 MCP 客户端需要绝对路径。以下命令根据当前仓库和本轮
-合成数据目录生成可复制的 JSON，不依赖客户端展开环境变量：
+ChatGPT Desktop、Codex CLI 与 IDE 扩展在同一 Codex 主机上共用 MCP 配置。Desktop
+可直接启动本地 STDIO 服务器，不需要公网 URL 或隧道。先用绝对路径注册只读、纯合成
+数据入口；显式写入 `CONTEXT_HUB_WRITE_ENABLED=0`，避免继承父进程中的意外写开关：
 
 ```powershell
 $McpCommand = (Resolve-Path '.\.venv\Scripts\context-hub-mcp.exe').Path
-$McpConfig = [ordered]@{
-  mcpServers = [ordered]@{
-    'context-hub' = [ordered]@{
-      command = $McpCommand
-      env = [ordered]@{
-        CONTEXT_HUB_DATA_DIR = [IO.Path]::GetFullPath($ContextHubTestData)
-      }
-    }
-  }
-}
-$McpConfig | ConvertTo-Json -Depth 5
+$DesktopData = [IO.Path]::GetFullPath($ContextHubTestData)
+codex mcp add context-hub `
+  --env "CONTEXT_HUB_DATA_DIR=$DesktopData" `
+  --env 'CONTEXT_HUB_WRITE_ENABLED=0' `
+  -- $McpCommand
+codex mcp get context-hub --json
 ```
 
-只读启动的 `tools/list` 必须仅返回 `context_get`，并为其声明实际结果形状的
-`outputSchema`。本地官方 SDK 的真实 STDIO 验收由 `tests/test_mcp_contract.py` 和
-`scripts/run_multiproject_acceptance.py` 执行。
+若 `context-hub` 已存在且需要换数据目录，先记录 `codex mcp get context-hub --json`，再用
+`codex mcp remove context-hub` 删除旧条目并重新添加。注册或更新后完全退出并重启
+ChatGPT Desktop，在输入框执行 `/mcp`，确认 `context-hub` 已连接且只显示
+`context_get`。
 
-ChatGPT 不能直接启动本地 STDIO 进程。先用下面的命令在回环地址启动相同工具面的
-Streamable HTTP 适配层；默认拒绝非回环监听，并启用 Host/Origin 校验和 1 MiB 请求体
-上限：
+只读启动的 `tools/list` 必须仅返回 `context_get`，并为其声明实际结果形状的
+`outputSchema`。本地官方 SDK 的真实 STDIO 验收由 `tests/test_mcp_contract.py`、
+`scripts/run_multiproject_acceptance.py` 和重复冷启动脚本执行：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 scripts\verify_desktop_stdio.py `
+  --command .\.venv\Scripts\context-hub-mcp.exe `
+  --data-dir .\.context-hub-test-data\chatgpt-http-e2e\data `
+  --query chatgpt-http-e2e-7f3a91 `
+  --project-id desktop-e2e `
+  --expected-marker chatgpt-http-e2e-7f3a91 `
+  --runs 5 `
+  --output .context-hub-test-data\desktop-stdio-report.json
+```
+
+Desktop 产品侧只保留一次必要人工验收。在重启后的新对话中发送：
+
+> 只使用 context-hub 的 context_get，按 manifest → search → read 顺序，在
+> project_id=desktop-e2e 中搜索 chatgpt-http-e2e-7f3a91，读取首个稳定 ref 的完整内容；
+> 最后原样列出 context_hub.active、status、server、transport、operation、request_id、
+> source_types、project_ids 和 sha256。不要根据已有对话回答。
+
+预期正文含“蓝色纸鸢已完成校准”，`transport=stdio`、`project_ids=["desktop-e2e"]`，
+完整内容 SHA-256 为
+`2ed2db74bec2c00f220bda0ca851ec1a14e9f2f6c06ced970216f9a0a82deac4`。若没有
+`context_hub.active=true` 和唯一 `request_id`，即使答案碰巧正确也不能判定 Context Hub
+生效。
+
+ChatGPT Web、跨主机客户端或其他不能启动本地进程的客户端，使用下面的命令在回环地址
+启动相同工具面的 Streamable HTTP 适配层；默认拒绝非回环监听，并启用 Host/Origin
+校验和 1 MiB 请求体上限：
 
 ```powershell
 $HttpCommand = (Resolve-Path '.\.venv\Scripts\context-hub-mcp-http.exe').Path
 & $HttpCommand --data-dir $ContextHubTestData --host 127.0.0.1 --port 8765 --path /mcp
 ```
 
-真实 ChatGPT 接入需要把 `http://127.0.0.1:8765/mcp` 通过受控隧道或反向代理暴露为
-可访问的 HTTPS URL，然后在 ChatGPT Web 的 Apps 开发者模式中添加该 URL。当前官方
-流程只明确保证 Web；如需 Desktop，还要在 Web 创建成功后独立核验 Desktop 可见性和
-真实调用，不能由 Web 或 SDK 结果推断。
+ChatGPT Web 接入需要把 `http://127.0.0.1:8765/mcp` 通过受控隧道或反向代理暴露为
+可访问的 HTTPS URL，然后在 ChatGPT Web 的 Apps 开发者模式中添加该 URL。Desktop
+本机日常使用应优先采用前述 STDIO 配置，避免隧道启动、外部暴露和额外网络延迟。
 代理与 Context Hub 在同机时应继续只监听回环地址；只有明确需要监听非回环接口时才用
 `--allow-public-bind`。若代理保留外部 Host，使用 `--allowed-host` 精确加入该主机名；
 不得使用宽泛通配或把真实记忆暴露在无认证入口。临时验收只用纯合成数据，完成后关闭
@@ -205,6 +229,23 @@ pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
 8. 客户端实测的产品名称、版本、接入方式、`tools/list`（含 `outputSchema`）、
    search/read、哈希和 `context_hub.transport` 结果。
 9. 截图或配置存在不能替代真实 MCP 调用；未执行的客户端验收必须标为未验证。
+
+## 8. 真实记忆导入闸门
+
+在以下条件全部满足前，不读取、注册或导入真实记忆：
+
+1. 重复 STDIO 验证至少 5 次全部通过，稳定 ref 与完整内容 SHA-256 一致。
+2. ChatGPT Desktop 完全重启后的新对话完成一次真实
+   `manifest → search → read`，并返回正确的调用状态与来源提示。
+3. `/mcp` 与 `tools/list` 都只暴露 `context_get`；配置中
+   `CONTEXT_HUB_WRITE_ENABLED=0`，数据根配置中 `write_enabled=false`。
+4. 手册冒烟、完整回归、多项目隔离、备份恢复和重建索引检查全部通过。
+
+闸门通过后，先由用户明确授权真实来源根目录、项目 ID 和排除项，再在独立的新数据根中
+分阶段注册；不要覆盖当前纯合成根。先备份 Context Hub 权威文件，并另行备份被注册的
+外部 Markdown（Context Hub 备份不会复制外部项目文件）；随后执行 `reindex`、`doctor`、
+项目隔离查询和敏感路径反向测试。只有验收报告通过后，才把 Desktop MCP 条目切换到真实
+数据根；保留旧条目参数和备份作为回滚依据。
 
 Pi / DeepSeek 调度器的独立保护验收、真实提供商与本地故障注入边界见
 [`docs/worker-guard-validation.md`](docs/worker-guard-validation.md)。

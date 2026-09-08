@@ -13,18 +13,23 @@
 - HTTP 响应带 `context_hub.active=true`、实际 transport、请求 ID 和有界来源摘要，
   可据此区分 Context Hub 命中与普通模型回答。
 - 首轮测试数据全部即时生成在临时目录，没有注册或导入既有记忆。
+- 本机 ChatGPT Desktop 共用 MCP 配置已注册 `context-hub` STDIO，数据根固定到纯合成
+  `desktop-e2e`，并显式设置 `CONTEXT_HUB_WRITE_ENABLED=0`。
+- 三批各 5 个独立的新 STDIO 进程均完成
+  `initialize → tools/list → manifest → search → read`；稳定 ref、正文 SHA-256、项目范围
+  和调用来源提示全部一致。三批全链路中位数分别为 644.357、1039.130、861.566 ms，
+  合计 15/15 通过。另行受 v1.1 门槛约束的冷启动加 `tools/list` 中位数为 922.855 ms。
 
 ## 当前官方产品边界
 
-OpenAI 当前的 ChatGPT 开发者模式与 MCP 应用说明仅明确保证 ChatGPT Web 上的创建、
-测试和使用流程，并要求提供可访问的远程 MCP URL；它不支持由 ChatGPT 直接启动本地
-STDIO 子进程。Context Hub 因此保留 STDIO 给本地客户端使用，并新增 Streamable HTTP
-供 HTTPS 隧道或受控反向代理转发。官方说明见
-[Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt)。
+OpenAI 当前 MCP 配置文档说明：ChatGPT Desktop、Codex CLI 与 IDE 扩展支持 MCP，并在
+同一 Codex 主机上共用配置；Desktop 支持本地 STDIO 和 Streamable HTTP。Desktop 的
+设置流程为“设置 → MCP 服务器 → 添加服务器”，保存后重启，并可用 `/mcp` 检查状态。
+官方说明见 [Model Context Protocol](https://learn.chatgpt.com/zh-Hans/docs/extend/mcp)。
 
-因此，本地 SDK 验收本身只证明协议和适配层可用；本轮另行完成了 ChatGPT Web 的真实
-调用。若还要确认 Desktop，仍需检查该应用是否在 Desktop 可见并成功调用。网页端通过
-不能推断 Desktop 端到端通过。
+本地 SDK 验收和共用配置证明服务可启动、可发现、可重复调用，但不能替代 Desktop 界面
+真正选择并调用工具。本轮已完成 Web 真实调用和 Desktop 侧自动化基线；Desktop 产品界面
+仍保留一次重启后的真实调用供用户确认。网页端通过不能推断 Desktop 端到端通过。
 
 ## 2026-09-08 Web 验收结果
 
@@ -55,7 +60,8 @@ Business 仅管理员/所有者可启用和部署；Enterprise/Edu 还可能受 
 仅能在开发者模式接入 read/fetch MCP。Context Hub 的临时验收端点只暴露只读
 `context_get`。
 
-除产品界面中的添加连接、选择工具与确认可见结果外，其余协议、HTTPS、检索、分页、
-哈希及关闭清理均由自动化验收承担。实际执行结果会写入验收报告；未完成产品侧调用时
-必须明确标为“待人工确认”，不得根据配置截图推断通过。本轮 Web 产品侧调用已由用户
-确认完成；Desktop 仍保持“待人工确认”。
+除 Desktop 完全重启、执行 `/mcp` 和发送一条固定验收提示外，其余配置、协议、检索、
+分页、哈希、来源提示与重复启动均由自动化验收承担。实际执行结果会写入验收报告；
+未完成产品侧调用时必须明确标为“待人工确认”，不得根据配置或 SDK 结果推断通过。
+本轮 Web 产品侧调用已由用户确认完成；Desktop 自动化基线通过，UI 真实调用仍待人工
+确认。通过前不导入真实记忆。

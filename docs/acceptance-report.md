@@ -9,8 +9,8 @@
   Python MCP SDK 客户端的真实 STDIO/Streamable HTTP 握手与调用。
 - 性能目标：核心搜索、预热 MCP 搜索和 STDIO 进程冷启动全部通过。
 - 数据边界：所有输入均由测试在临时目录中即时生成；没有访问、注册或导入既有记忆。
-- 客户端边界：ChatGPT Web 真实端到端已通过；ChatGPT Desktop 尚未独立验证，不能由
-  Web 或本地 SDK 结果推断通过。
+- 客户端边界：ChatGPT Web 真实端到端已通过；ChatGPT Desktop 共用配置和 5 次独立
+  STDIO 全链路已通过，产品界面真实调用仍待一次人工确认。
 
 性能脚本返回退出码 0，整体报告中的 `ok` 为 `true`；所有检查均使用即时生成的
 合成数据。
@@ -151,11 +151,25 @@ GitHub 共享 Runner 曾在同一提交的首次执行中同时出现重建索�
 Web 界面是在修复前报告该建议，因此“建议是否消失”没有被 UI 再次扫描确认；这是显示层
 复核项，不影响已经完成的调用真实性和修复后的协议契约验收。
 
+## ChatGPT Desktop 独立接入
+
+2026-09-08，按 OpenAI 当前 MCP 配置文档在 ChatGPT Desktop 共用的用户级配置中注册
+本地 STDIO `context-hub`。命令固定到仓库虚拟环境的绝对路径，数据根固定到纯合成
+`desktop-e2e`，并显式设置 `CONTEXT_HUB_WRITE_ENABLED=0`。`codex mcp get context-hub
+--json` 返回 `enabled=true`、`transport.type=stdio`，且环境参数与预期一致。
+
+`scripts/verify_desktop_stdio.py` 连续启动 5 个全新进程，每个进程都完成官方 SDK 的
+`initialize → tools/list → manifest → search → read`。5 次均只暴露 `context_get`，
+`outputSchema` 存在，调用标记为 `active=true`、`status=invoked`、`server=context-hub`、
+`transport=stdio`；稳定 ref 和 SHA-256 全部一致。三批各 5 个全新进程均通过；全链路
+中位数分别为 644.357、1039.130、861.566 ms，各批最大值分别为 789.187、1153.436、
+982.140 ms。v1.1 的 1000 ms 门槛只约束冷启动加 `tools/list`；对应 3 个新进程中位数为
+922.855 ms，仍通过。完整 `manifest → search → read` 链路不套用该冷启动门槛。
+
 ## 未覆盖与下一验收点
 
-- 当前 OpenAI 官方文档不提供 ChatGPT Desktop 直接启动本地 STDIO MCP 的接入方式，
-  因此 ChatGPT Desktop 原生端到端验收尚未完成。
-- Secure MCP Tunnel 是当前官方的本地或私有 MCP 接入路径，但会创建外部状态并需要
-  组织权限、隧道 ID 和运行时密钥；未经用户另行授权未执行。
-- 若继续 Desktop 验收，仍只使用合成数据，并需在该客户端实际确认应用可见、调用来源
-  提示、search、稳定 ref 分页 read 与 SHA-256；Web 已完成的结果不能替代这一步。
+- Desktop 必须完全重启后在新对话执行 `/mcp`，再发送运行手册中的固定提示并核对正文、
+  调用标记和 SHA-256；这是剩余的唯一产品界面人工验收。
+- 配置可见、SDK 通过和 Web 已通过都不能替代这次 Desktop UI 真实调用。
+- UI 通过前继续保持纯合成、只读数据根；通过后也只有在用户明确授权真实来源路径、项目
+  ID 与排除项后，才进入独立数据根的备份、注册、重建、隔离和隐私验收。

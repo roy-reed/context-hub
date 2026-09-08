@@ -6,9 +6,9 @@ SQLite FTS5 为可重建索引，并通过 MCP STDIO 与 Streamable HTTP 暴露�
 首轮开发和验收只使用仓库内测试生成的合成数据，不导入任何既有记忆或个人资料。
 
 当前代码已经用官方 Python MCP SDK 完成本地真实 STDIO、Streamable HTTP 握手、
-`tools/list` 和 `context_get` 调用。ChatGPT 使用可访问的 HTTPS MCP URL，而不是直接
-启动本地 STDIO 进程；当前官方创建与测试入口以 ChatGPT Web 为准。产品侧状态、临时
-纯合成验收入口和人工确认边界记录在
+`tools/list` 和 `context_get` 调用。ChatGPT Desktop 可直接注册本地 STDIO 服务；
+ChatGPT Web 或远程客户端使用可访问的 HTTPS MCP URL。产品侧状态、纯合成验收入口和
+人工确认边界记录在
 [`docs/chatgpt-client-status.md`](docs/chatgpt-client-status.md)。
 
 ## 快速验证
@@ -20,6 +20,7 @@ pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe -X utf8 scripts\run_multiproject_acceptance.py --output .context-hub-test-data\multiproject-report.json
 .\.venv\Scripts\python.exe -X utf8 scripts\run_acceptance.py --output .context-hub-test-data\acceptance-report.json
+.\.venv\Scripts\python.exe -X utf8 scripts\verify_desktop_stdio.py --command .\.venv\Scripts\context-hub-mcp.exe --data-dir .\.context-hub-test-data\chatgpt-http-e2e\data --query chatgpt-http-e2e-7f3a91 --project-id desktop-e2e --expected-marker chatgpt-http-e2e-7f3a91 --runs 5
 ```
 
 PowerShell 冒烟脚本逐条调用手册公开的 CLI，验证初始化、项目注册、清单、检索、稳定
