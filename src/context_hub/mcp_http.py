@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+import hmac
 import ipaddress
 import os
 from pathlib import Path
+import re
 from typing import Annotated, Any, Literal, Sequence
 
 from mcp_types import CallToolResult
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import RootModel
+import uvicorn
 
 from . import __version__
 from .mcp_contracts import CONTEXT_GET_OUTPUT_SCHEMA, CONTEXT_PUT_OUTPUT_SCHEMA
@@ -23,6 +26,47 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_PATH = "/mcp"
 DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024
+DEFAULT_AUTH_TOKEN_ENV = "CONTEXT_HUB_HTTP_BEARER_TOKEN"
+MIN_AUTH_TOKEN_CHARS = 32
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class BearerAuthMiddleware:
+    """Require one exact bearer token without logging or exposing its value."""
+
+    def __init__(self, app: Any, token: str) -> None:
+        self.app = app
+        self.expected = f"Bearer {token}".encode("utf-8")
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") not in {"http", "websocket"}:
+            await self.app(scope, receive, send)
+            return
+
+        supplied = next(
+            (value for name, value in scope.get("headers", ()) if name.lower() == b"authorization"),
+            b"",
+        )
+        if hmac.compare_digest(supplied, self.expected):
+            await self.app(scope, receive, send)
+            return
+
+        if scope.get("type") == "websocket":
+            await send({"type": "websocket.close", "code": 4401})
+            return
+        body = b'{"error":"unauthorized"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"www-authenticate", b"Bearer"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
 
 
 class _ContextGetOutput(RootModel[dict[str, Any]]):
@@ -73,6 +117,8 @@ def _security_settings(
     origins = {
         "http://127.0.0.1:*",
         "http://localhost:*",
+        "https://127.0.0.1:*",
+        "https://localhost:*",
         "https://chatgpt.com",
         *allowed_origins,
     }
@@ -140,7 +186,7 @@ def build_http_server(
 
         @server.tool(
             name="context_put",
-            description="Append one explicitly confirmed immutable event and report its source.",
+            description="Append one explicitly confirmed event and report its source.",
             structured_output=True,
         )
         async def context_put(
@@ -177,7 +223,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-public-bind",
         action="store_true",
-        help="acknowledge binding to a non-loopback interface",
+        help="acknowledge binding to a non-loopback interface (authentication still required)",
+    )
+    parser.add_argument(
+        "--auth-token-env",
+        default=DEFAULT_AUTH_TOKEN_ENV,
+        help="environment variable containing a bearer token (never pass the token on the command line)",
+    )
+    parser.add_argument("--tls-cert", help="PEM certificate for direct HTTPS")
+    parser.add_argument("--tls-key", help="PEM private key for direct HTTPS")
+    parser.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help="allow public plain HTTP only when TLS is terminated by a trusted reverse proxy",
     )
     parser.add_argument(
         "--allowed-host",
@@ -200,21 +258,48 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _runtime_security(args: argparse.Namespace) -> tuple[str | None, Path | None, Path | None]:
+    if _ENV_NAME_RE.fullmatch(args.auth_token_env) is None:
+        raise SystemExit("auth-token-env must be a valid environment variable name")
+    token = os.environ.get(args.auth_token_env, "").strip() or None
+    if token is not None and len(token) < MIN_AUTH_TOKEN_CHARS:
+        raise SystemExit(f"bearer token must contain at least {MIN_AUTH_TOKEN_CHARS} characters")
+
+    if bool(args.tls_cert) != bool(args.tls_key):
+        raise SystemExit("tls-cert and tls-key must be supplied together")
+    certificate = Path(args.tls_cert).expanduser().resolve() if args.tls_cert else None
+    private_key = Path(args.tls_key).expanduser().resolve() if args.tls_key else None
+    for label, path in (("tls-cert", certificate), ("tls-key", private_key)):
+        if path is not None and not path.is_file():
+            raise SystemExit(f"{label} must name an existing file")
+
+    if not _is_loopback(args.host):
+        if not args.allow_public_bind:
+            raise SystemExit("non-loopback bind requires --allow-public-bind")
+        if token is None:
+            raise SystemExit(
+                f"non-loopback bind requires a bearer token in {args.auth_token_env}"
+            )
+        if certificate is None and not args.allow_insecure_http:
+            raise SystemExit(
+                "non-loopback bind requires --tls-cert/--tls-key, or --allow-insecure-http "
+                "behind a trusted TLS reverse proxy"
+            )
+    return token, certificate, private_key
+
+
 def run(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if not 1 <= args.port <= 65535:
         raise SystemExit("port must be between 1 and 65535")
     if not 1024 <= args.max_request_bytes <= 16 * 1024 * 1024:
         raise SystemExit("max-request-bytes must be between 1024 and 16777216")
-    if not _is_loopback(args.host) and not args.allow_public_bind:
-        raise SystemExit("non-loopback bind requires --allow-public-bind")
+    token, certificate, private_key = _runtime_security(args)
 
     data_dir = args.data_dir or os.environ.get("CONTEXT_HUB_DATA_DIR")
     server, _ = build_http_server(Path(data_dir) if data_dir else None)
-    server.run(
-        "streamable-http",
+    app: Any = server.streamable_http_app(
         host=args.host,
-        port=args.port,
         streamable_http_path=args.path,
         json_response=True,
         stateless_http=True,
@@ -225,6 +310,16 @@ def run(argv: Sequence[str] | None = None) -> None:
             allowed_hosts=args.allowed_host,
             allowed_origins=args.allowed_origin,
         ),
+    )
+    if token is not None:
+        app = BearerAuthMiddleware(app, token)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        ssl_certfile=str(certificate) if certificate else None,
+        ssl_keyfile=str(private_key) if private_key else None,
+        server_header=False,
     )
 
 

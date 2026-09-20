@@ -8,7 +8,9 @@ from typing import Any
 def _invocation_marker_schema() -> dict[str, Any]:
     return {
         "type": "object",
-        "properties": {"active": {"const": True}},
+        "properties": {
+            "active": {"const": True},
+        },
         "required": [
             "active",
             "status",
@@ -17,6 +19,9 @@ def _invocation_marker_schema() -> dict[str, Any]:
             "source_count",
             "source_types",
             "project_ids",
+            "freshness",
+            "sync_action",
+            "classification",
         ],
     }
 

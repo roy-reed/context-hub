@@ -1,14 +1,17 @@
-# Context Hub MVP
+# Context Hub v0.2
 
-本仓库实现 Context Hub v1.1 的本地优先 MVP：以 JSONL/Markdown 为事实源，
+本仓库按 Context Hub v1.1 规格交付本地优先的 v0.2 实现：以 JSONL/Markdown 为事实源，
 SQLite FTS5 为可重建索引，并通过 MCP STDIO 与 Streamable HTTP 暴露最小工具面。
+日常 Loop 提供有节流的同步、只读状态、单步安全修复、合成评测、真实导入预检和外接
+worker 保护记录。
 
 首轮开发和验收只使用仓库内测试生成的合成数据，不导入任何既有记忆或个人资料。
 
 当前代码已经用官方 Python MCP SDK 完成本地真实 STDIO、Streamable HTTP 握手、
 `tools/list` 和 `context_get` 调用。ChatGPT Desktop 可直接注册本地 STDIO 服务；
-ChatGPT Web 或远程客户端使用可访问的 HTTPS MCP URL。产品侧状态、纯合成验收入口和
-人工确认边界记录在
+ChatGPT Web 或远程客户端使用带 Bearer 认证的 HTTPS MCP URL。非回环监听默认拒绝，
+必须显式确认公网绑定并配置认证与 TLS（或位于可信 TLS 反向代理之后）。产品侧状态、
+纯合成验收入口和人工确认边界记录在
 [`docs/chatgpt-client-status.md`](docs/chatgpt-client-status.md)。
 
 ## 快速验证
@@ -18,6 +21,7 @@ ChatGPT Web 或远程客户端使用可访问的 HTTPS MCP URL。产品侧状态
 .\.venv\Scripts\python.exe -m pip install -e . --no-deps
 pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -X utf8 scripts\run_loop_acceptance.py --output .context-hub-test-data\loop-acceptance-report.json
 .\.venv\Scripts\python.exe -X utf8 scripts\run_multiproject_acceptance.py --output .context-hub-test-data\multiproject-report.json
 .\.venv\Scripts\python.exe -X utf8 scripts\run_acceptance.py --output .context-hub-test-data\acceptance-report.json
 .\.venv\Scripts\python.exe -X utf8 scripts\verify_desktop_stdio.py --command .\.venv\Scripts\context-hub-mcp.exe --data-dir .\.context-hub-test-data\chatgpt-http-e2e\data --query chatgpt-http-e2e-7f3a91 --project-id desktop-e2e --expected-marker chatgpt-http-e2e-7f3a91 --runs 5
@@ -30,6 +34,10 @@ PowerShell 冒烟脚本逐条调用手册公开的 CLI，验证初始化、项�
 多项目验收会在单个临时目录内生成 3 个彼此隔离的项目，验证固定 Top-3 检索集、
 项目与类型过滤、分页哈希、源文件变更/删除、历史版本、无损重建，以及本地真实
 STDIO 的 `manifest → search → read`。脚本不读取现有 Context Hub 数据或既有记忆。
+
+Loop 验收在一个临时目录中覆盖两项目隔离、同步节流、单步备份、合成评测、导入计划
+快照、1,000,000 token 边界、输出截断元数据、备份恢复和默认关闭遥测。真实记忆导入
+闸门目前保持关闭；`import-plan --dry-run` 和 `approve-import` 都不会自动注册来源。
 
 安装、只读启动、显式写入、备份恢复和客户端验收步骤见 [`RUNBOOK.md`](RUNBOOK.md)。
 Pi / DeepSeek 的 1,000,000 token 任务上限、截断、重试与墙钟保护实测见

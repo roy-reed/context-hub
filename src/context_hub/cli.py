@@ -10,6 +10,13 @@ from typing import Any, Sequence
 
 from .errors import ContextHubError
 from .hub import ALLOWED_ACTIONS, ALLOWED_KINDS, ContextHub
+from .loop import (
+    MAX_WORKER_ATTEMPTS,
+    MAX_WORKER_OUTPUT_CHARS,
+    MAX_WORKER_WALL_SECONDS,
+    LoopCoordinator,
+    WORKER_OUTCOMES,
+)
 
 
 def _print_json(value: Any) -> None:
@@ -54,6 +61,68 @@ def build_parser() -> argparse.ArgumentParser:
     put.add_argument("--event-id")
 
     commands.add_parser("manifest", help="show the public project manifest")
+    sync = commands.add_parser("sync", help="synchronize registered fact sources")
+    sync.add_argument("--force", action="store_true", help="bypass the unchanged-source throttle")
+    sync.add_argument("--full", action="store_true", help="rebuild the derived index from fact sources")
+    sync.add_argument("--min-interval-seconds", type=int)
+    status = commands.add_parser("status", help="return bounded loop health and freshness")
+    status.add_argument(
+        "--quick",
+        action="store_true",
+        required=True,
+        help="use the bounded fact-source/index non-mutating status contract",
+    )
+    loop_check = commands.add_parser("loop-check", help="choose one deterministic next loop action")
+    loop_check.add_argument(
+        "--apply-safe",
+        action="store_true",
+        help="apply at most one local sync, reindex, or backup action",
+    )
+    import_plan = commands.add_parser(
+        "import-plan",
+        help="inspect an allow-listed source set without importing it",
+    )
+    import_plan.add_argument("project_id")
+    import_plan.add_argument("root")
+    import_plan.add_argument("--file", action="append", dest="files")
+    import_plan.add_argument("--classification", choices=["synthetic", "real"], default="real")
+    import_plan.add_argument(
+        "--dry-run",
+        action="store_true",
+        required=True,
+        help="required safety acknowledgement; this command never imports",
+    )
+    approve_import = commands.add_parser(
+        "approve-import",
+        help="recompute and approve one unchanged real-data import plan",
+    )
+    approve_import.add_argument("plan_hash")
+    approve_import.add_argument("project_id")
+    approve_import.add_argument("root")
+    approve_import.add_argument("--file", action="append", dest="files")
+    approve_import.add_argument("--classification", choices=["real"], default="real")
+    approve_import.add_argument("--confirm-approval", action="store_true", required=True)
+    evaluate = commands.add_parser("evaluate", help="run a synthetic-only retrieval quality set")
+    evaluate.add_argument("cases")
+    worker_policy = commands.add_parser(
+        "worker-policy",
+        help="validate an external worker request against hard protection limits",
+    )
+    worker_policy.add_argument("max_total_tokens", type=int)
+    worker_policy.add_argument("--max-attempts", type=int, default=MAX_WORKER_ATTEMPTS)
+    worker_policy.add_argument("--max-output-chars", type=int, default=MAX_WORKER_OUTPUT_CHARS)
+    worker_policy.add_argument("--max-wall-seconds", type=int, default=MAX_WORKER_WALL_SECONDS)
+    record_worker = commands.add_parser(
+        "record-worker",
+        help="record privacy-safe external worker outcome metadata",
+    )
+    record_worker.add_argument("task_id")
+    record_worker.add_argument("--max-total-tokens", type=int, required=True)
+    record_worker.add_argument("--observed-tokens", type=int, required=True)
+    record_worker.add_argument("--attempts", type=int, required=True)
+    record_worker.add_argument("--output-chars", type=int, required=True)
+    record_worker.add_argument("--wall-seconds", type=float, required=True)
+    record_worker.add_argument("--outcome", choices=sorted(WORKER_OUTCOMES), required=True)
     doctor = commands.add_parser("doctor", help="validate fact sources and the derived index")
     doctor.add_argument("--reindex", action="store_true", help="rebuild the derived index before validation")
     commands.add_parser("reindex", help="rebuild SQLite solely from fact sources")
@@ -72,6 +141,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             result = ContextHub.restore(args.backup, args.destination)
         else:
             hub = ContextHub(args.data_dir)
+            loop = LoopCoordinator(hub)
             if args.command == "init":
                 result = hub.initialize(write_enabled=args.enable_writes)
             elif args.command == "register-project":
@@ -101,6 +171,51 @@ def run(argv: Sequence[str] | None = None) -> int:
                 )
             elif args.command == "manifest":
                 result = hub.manifest()
+            elif args.command == "sync":
+                result = loop.sync(
+                    force=args.force,
+                    full=args.full,
+                    min_interval_seconds=args.min_interval_seconds,
+                )
+            elif args.command == "status":
+                result = loop.quick_status()
+            elif args.command == "loop-check":
+                result = loop.loop_check(apply_safe=args.apply_safe)
+            elif args.command == "import-plan":
+                result = loop.import_plan(
+                    project_id=args.project_id,
+                    root=args.root,
+                    files=args.files,
+                    classification=args.classification,
+                )
+            elif args.command == "approve-import":
+                result = loop.approve_import(
+                    args.plan_hash,
+                    project_id=args.project_id,
+                    root=args.root,
+                    files=args.files,
+                    classification=args.classification,
+                    confirmed=args.confirm_approval,
+                )
+            elif args.command == "evaluate":
+                result = loop.evaluate(args.cases)
+            elif args.command == "worker-policy":
+                result = loop.worker_policy(
+                    max_total_tokens=args.max_total_tokens,
+                    max_attempts=args.max_attempts,
+                    max_output_chars=args.max_output_chars,
+                    max_wall_seconds=args.max_wall_seconds,
+                )
+            elif args.command == "record-worker":
+                result = loop.record_worker(
+                    task_id=args.task_id,
+                    max_total_tokens=args.max_total_tokens,
+                    observed_tokens=args.observed_tokens,
+                    attempts=args.attempts,
+                    output_chars=args.output_chars,
+                    wall_seconds=args.wall_seconds,
+                    outcome=args.outcome,
+                )
             elif args.command == "doctor":
                 result = hub.doctor(reindex=args.reindex)
             elif args.command == "reindex":
@@ -110,7 +225,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             else:
                 raise AssertionError(f"unhandled command: {args.command}")
         _print_json(result)
-        if args.command == "doctor" and not result["ok"]:
+        if result.get("ok") is False:
             return 2
         return 0
     except (ContextHubError, FileNotFoundError, PermissionError) as exc:

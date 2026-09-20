@@ -5,13 +5,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import AsyncExitStack
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
+
+from context_hub.mcp_http import DEFAULT_AUTH_TOKEN_ENV, MIN_AUTH_TOKEN_CHARS
 
 
 def _require_marker(payload: dict[str, Any], *, operation: str) -> dict[str, Any]:
@@ -33,6 +38,13 @@ def _require_marker(payload: dict[str, Any], *, operation: str) -> dict[str, Any
     request_id = marker.get("request_id")
     if not isinstance(request_id, str) or not request_id.startswith("ch_"):
         raise AssertionError(f"{operation}: invalid request_id")
+    freshness = marker.get("freshness")
+    if freshness not in {"current", "stale", "unknown"}:
+        raise AssertionError(f"{operation}: invalid freshness marker")
+    if not isinstance(marker.get("sync_action"), str):
+        raise AssertionError(f"{operation}: sync_action marker is missing")
+    if marker.get("classification") not in {"synthetic", "real"}:
+        raise AssertionError(f"{operation}: invalid classification marker")
     return marker
 
 
@@ -42,90 +54,101 @@ async def verify(
     query: str,
     project_id: str,
     expected_marker: str,
+    auth_token: str | None = None,
 ) -> dict[str, Any]:
-    async with streamable_http_client(url) as streams:
-        async with ClientSession(*streams) as session:
-            initialized = await asyncio.wait_for(session.initialize(), timeout=20)
-            listed = await asyncio.wait_for(session.list_tools(), timeout=20)
-            tool_names = [tool.name for tool in listed.tools]
-            if tool_names != ["context_get"]:
-                raise AssertionError(f"read-only endpoint exposed unexpected tools: {tool_names}")
-            output_schema = listed.tools[0].output_schema
-            if not isinstance(output_schema, dict):
-                raise AssertionError("context_get did not declare outputSchema")
-            required = output_schema.get("required")
-            properties = output_schema.get("properties")
-            if not isinstance(required, list) or not {"op", "context_hub"}.issubset(required):
-                raise AssertionError("context_get outputSchema has an incomplete required contract")
-            if not isinstance(properties, dict) or not {
-                "items",
-                "content",
-                "projects",
-                "context_hub",
-            }.issubset(properties):
-                raise AssertionError("context_get outputSchema has incomplete result properties")
-
-            manifest_result = await asyncio.wait_for(
-                session.call_tool("context_get", {"op": "manifest"}),
-                timeout=20,
+    async with AsyncExitStack() as stack:
+        http_client = None
+        if auth_token is not None:
+            http_client = await stack.enter_async_context(
+                create_mcp_http_client(
+                    headers={"Authorization": f"Bearer {auth_token}"}
+                )
             )
-            if manifest_result.is_error or not manifest_result.structured_content:
-                raise AssertionError("manifest call failed")
-            manifest = manifest_result.structured_content
-            manifest_marker = _require_marker(manifest, operation="manifest")
-            project_ids = [item.get("project_id") for item in manifest.get("projects", [])]
-            if project_id not in project_ids:
-                raise AssertionError(f"project {project_id!r} is absent from manifest")
+        streams = await stack.enter_async_context(
+            streamable_http_client(url, http_client=http_client)
+        )
+        session = await stack.enter_async_context(ClientSession(*streams))
+        initialized = await asyncio.wait_for(session.initialize(), timeout=20)
+        listed = await asyncio.wait_for(session.list_tools(), timeout=20)
+        tool_names = [tool.name for tool in listed.tools]
+        if tool_names != ["context_get"]:
+            raise AssertionError(f"read-only endpoint exposed unexpected tools: {tool_names}")
+        output_schema = listed.tools[0].output_schema
+        if not isinstance(output_schema, dict):
+            raise AssertionError("context_get did not declare outputSchema")
+        required = output_schema.get("required")
+        properties = output_schema.get("properties")
+        if not isinstance(required, list) or not {"op", "context_hub"}.issubset(required):
+            raise AssertionError("context_get outputSchema has an incomplete required contract")
+        if not isinstance(properties, dict) or not {
+            "items",
+            "content",
+            "projects",
+            "context_hub",
+        }.issubset(properties):
+            raise AssertionError("context_get outputSchema has incomplete result properties")
 
-            search_result = await asyncio.wait_for(
-                session.call_tool(
-                    "context_get",
-                    {
-                        "op": "search",
-                        "query": query,
-                        "project_id": project_id,
-                        "limit": 3,
-                        "max_chars": 600,
-                    },
-                ),
-                timeout=20,
-            )
-            if search_result.is_error or not search_result.structured_content:
-                raise AssertionError("search call failed")
-            search = search_result.structured_content
-            search_marker = _require_marker(search, operation="search")
-            items = search.get("items")
-            if not isinstance(items, list) or not items:
-                raise AssertionError("search returned no items")
-            if expected_marker not in str(items[0].get("snippet", "")):
-                raise AssertionError("search result did not contain the expected synthetic marker")
-            if search_marker.get("project_ids") != [project_id]:
-                raise AssertionError("search source marker did not preserve project scope")
-            if search_marker.get("source_types") != ["project_file"]:
-                raise AssertionError("search source marker did not identify the registered project file")
+        manifest_result = await asyncio.wait_for(
+            session.call_tool("context_get", {"op": "manifest"}),
+            timeout=20,
+        )
+        if manifest_result.is_error or not manifest_result.structured_content:
+            raise AssertionError("manifest call failed")
+        manifest = manifest_result.structured_content
+        manifest_marker = _require_marker(manifest, operation="manifest")
+        project_ids = [item.get("project_id") for item in manifest.get("projects", [])]
+        if project_id not in project_ids:
+            raise AssertionError(f"project {project_id!r} is absent from manifest")
 
-            ref = items[0].get("ref")
-            if not isinstance(ref, str) or not ref:
-                raise AssertionError("search result did not provide a stable ref")
-            read_result = await asyncio.wait_for(
-                session.call_tool(
-                    "context_get",
-                    {"op": "read", "ref": ref, "max_chars": 4000},
-                ),
-                timeout=20,
-            )
-            if read_result.is_error or not read_result.structured_content:
-                raise AssertionError("read call failed")
-            read = read_result.structured_content
-            read_marker = _require_marker(read, operation="read")
-            content = read.get("content")
-            digest = read.get("sha256")
-            if not isinstance(content, str) or expected_marker not in content:
-                raise AssertionError("read content did not contain the expected synthetic marker")
-            if digest != hashlib.sha256(content.encode("utf-8")).hexdigest():
-                raise AssertionError("read SHA-256 did not match the complete content")
-            if read.get("truncated") or read.get("next_cursor") is not None:
-                raise AssertionError("verification fixture unexpectedly required pagination")
+        search_result = await asyncio.wait_for(
+            session.call_tool(
+                "context_get",
+                {
+                    "op": "search",
+                    "query": query,
+                    "project_id": project_id,
+                    "limit": 3,
+                    "max_chars": 600,
+                },
+            ),
+            timeout=20,
+        )
+        if search_result.is_error or not search_result.structured_content:
+            raise AssertionError("search call failed")
+        search = search_result.structured_content
+        search_marker = _require_marker(search, operation="search")
+        items = search.get("items")
+        if not isinstance(items, list) or not items:
+            raise AssertionError("search returned no items")
+        if expected_marker not in str(items[0].get("snippet", "")):
+            raise AssertionError("search result did not contain the expected synthetic marker")
+        if search_marker.get("project_ids") != [project_id]:
+            raise AssertionError("search source marker did not preserve project scope")
+        if search_marker.get("source_types") != ["project_file"]:
+            raise AssertionError("search source marker did not identify the registered project file")
+
+        ref = items[0].get("ref")
+        if not isinstance(ref, str) or not ref:
+            raise AssertionError("search result did not provide a stable ref")
+        read_result = await asyncio.wait_for(
+            session.call_tool(
+                "context_get",
+                {"op": "read", "ref": ref, "max_chars": 4000},
+            ),
+            timeout=20,
+        )
+        if read_result.is_error or not read_result.structured_content:
+            raise AssertionError("read call failed")
+        read = read_result.structured_content
+        read_marker = _require_marker(read, operation="read")
+        content = read.get("content")
+        digest = read.get("sha256")
+        if not isinstance(content, str) or expected_marker not in content:
+            raise AssertionError("read content did not contain the expected synthetic marker")
+        if digest != hashlib.sha256(content.encode("utf-8")).hexdigest():
+            raise AssertionError("read SHA-256 did not match the complete content")
+        if read.get("truncated") or read.get("next_cursor") is not None:
+            raise AssertionError("verification fixture unexpectedly required pagination")
 
     request_ids = [
         manifest_marker["request_id"],
@@ -144,11 +167,18 @@ async def verify(
             marker.get("transport") == "streamable-http"
             for marker in (manifest_marker, search_marker, read_marker)
         ),
+        "freshness_and_classification_reported": all(
+            marker.get("freshness") in {"current", "stale", "unknown"}
+            and isinstance(marker.get("sync_action"), str)
+            and marker.get("classification") in {"synthetic", "real"}
+            for marker in (manifest_marker, search_marker, read_marker)
+        ),
     }
     return {
         "ok": all(checks.values()),
         "synthetic_only": True,
         "endpoint": url,
+        "bearer_auth_used": auth_token is not None,
         "protocol_version": initialized.protocol_version,
         "tools": tool_names,
         "query": query,
@@ -170,8 +200,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--query", required=True)
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--expected-marker", required=True)
+    parser.add_argument(
+        "--auth-token-env",
+        default=DEFAULT_AUTH_TOKEN_ENV,
+        help=(
+            "environment variable containing the bearer token; the token is never "
+            "accepted on the command line or included in the report"
+        ),
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
+
+    auth_token = os.environ.get(args.auth_token_env)
+    if auth_token is not None:
+        auth_token = auth_token.strip() or None
+    if auth_token is not None and len(auth_token) < MIN_AUTH_TOKEN_CHARS:
+        parser.error(
+            f"{args.auth_token_env} must contain at least {MIN_AUTH_TOKEN_CHARS} characters"
+        )
 
     report = asyncio.run(
         verify(
@@ -179,6 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             query=args.query,
             project_id=args.project_id,
             expected_marker=args.expected_marker,
+            auth_token=auth_token,
         )
     )
     encoded = json.dumps(report, ensure_ascii=False, indent=2) + "\n"

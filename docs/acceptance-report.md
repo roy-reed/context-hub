@@ -1,15 +1,16 @@
 # Context Hub MVP 验收报告
 
-初始验收日期：2026-09-05；客户端补充验收日期：2026-09-08。
+初始验收日期：2026-09-05；客户端补充验收日期：2026-09-08；Loop 交付验收日期：
+2026-09-20。
 
 ## 结论
 
-- 当前功能回归：33/33 通过，包括 Unicode 与哈希分页、FTS5/LIKE 分流、版本替换与
-  墓碑、允许列表、四进程并发写入、索引故障恢复、备份、只读工具隐藏，以及官方
-  Python MCP SDK 客户端的真实 STDIO/Streamable HTTP 握手与调用。
+- 当前功能回归：38/38 通过，包括 Unicode 与哈希分页、FTS5/LIKE 分流、版本替换与
+  墓碑、允许列表、四进程并发写入、索引故障恢复、备份、只读工具隐藏、Loop 与真实
+  导入闸门、外接 worker 保护，以及带 Bearer 鉴权的 STDIO/Streamable HTTP 调用。
 - 性能目标：核心搜索、预热 MCP 搜索和 STDIO 进程冷启动全部通过。
 - 数据边界：所有输入均由测试在临时目录中即时生成；没有访问、注册或导入既有记忆。
-- 客户端边界：ChatGPT Web 真实端到端已通过；ChatGPT Desktop 共用配置和 5 次独立
+- 客户端边界：历史 ChatGPT Web 真实端到端已通过；ChatGPT Desktop 共用配置和 5 次独立
   STDIO 全链路已通过，产品界面真实调用仍待一次人工确认。
 
 性能脚本返回退出码 0，整体报告中的 `ok` 为 `true`；所有检查均使用即时生成的
@@ -30,8 +31,9 @@
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
 ```
 
-初始结果：25 个测试全部通过，用时 18.920 秒。2026-09-08 加入 HTTP MCP、恢复安全和
-结果契约回归后，当前完整测试为 33/33 通过，用时 17.352 秒。覆盖的关键不变量包括：
+初始结果：25 个测试全部通过，用时 18.920 秒。2026-09-20 加入 Loop、真实导入闸门、
+worker 保护、HTTP 鉴权和公网绑定保护后，当前完整测试为 38/38 通过，用时 26.028 秒。
+覆盖的关键不变量包括：
 
 1. 四个独立进程各追加 100 条，事实源最终恰好有 400 条有效 JSONL 事件。
 2. 索引写入失败时事件已经 `flush`、`fsync` 并持久化，随后可用
@@ -44,6 +46,10 @@
 7. 作为库导入 `context_hub.mcp_stdio` 不会替换或破坏官方 `mcp` 公共包。
 8. STDIO 与 Streamable HTTP 的 `tools/list` 均声明实际结果形状的 `outputSchema`；调用
    返回匹配的 `structuredContent`，完整可写工具面仍不超过 3072 字节预算。
+9. 非回环 HTTP 绑定默认拒绝启动；必须同时显式允许公网绑定、提供至少 32 字符 Bearer
+   凭据并配置 TLS，只有显式 `--allow-insecure-http` 才能解除 TLS 约束。
+10. 真实导入批准绑定根目录、允许文件、大小、mtime、ctime 和 SHA-256 的精确快照；
+    每次批准及最终注册前必须用当前来源重新校验。
 
 合成测试产物仅允许写入本地忽略目录 `.context-hub-test-data/`，不会提交到仓库。
 
@@ -63,8 +69,9 @@ pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1 `
   -Output .context-hub-test-data\runbook-smoke-report-manual-alignment.json
 ```
 
-结果：退出码 0，`ok=true`、`synthetic_only=true`、`external_fact_inputs=0`，全部
-62 项检查为 `true`，用时 5344.786 ms。脚本逐条调用手册公开的 CLI，覆盖初始化与
+2026-09-20 复验结果：退出码 0，`ok=true`、`synthetic_only=true`、
+`external_fact_inputs=0`，全部 68 项检查为 `true`，用时 6072.418 ms。脚本逐条调用
+手册公开的 CLI，覆盖初始化与
 幂等、默认允许列表、清单、项目检索、9 页稳定 ref/cursor 分页及 SHA-256、显式写入、
 类型过滤、诊断、删除派生 SQLite 后精确重建、稳定 ref/哈希以及权威事实源备份。
 
@@ -97,7 +104,7 @@ pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1 `
   精确返回 3 个项目、5 个事件、11 个章节。
 - 官方 Python MCP SDK 启动本地只读 STDIO 进程，完成
   `manifest → cobalt 项目 search → read`，工具面、内容、来源和哈希全部匹配；该轮
-  全链路用时 1014.237 ms。
+  2026-09-20 全链路复验用时 889.596 ms。
 
 ## 10,000 条性能验收
 
@@ -110,14 +117,14 @@ pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1 `
 
 | 检查项 | 实测 | 目标 | 结果 |
 | --- | ---: | ---: | --- |
-| 核心搜索 p50（200 次） | 3.631 ms | <= 50 ms | 通过 |
-| 核心搜索 p95（200 次） | 5.037 ms | <= 150 ms | 通过 |
-| 预热 MCP 搜索 p95（40 次） | 6.569 ms | <= 500 ms | 通过 |
-| STDIO 启动并完成 `tools/list`（3 次中位数） | 768.602 ms | <= 1000 ms | 通过 |
+| 核心搜索 p50（200 次） | 2.962 ms | <= 50 ms | 通过 |
+| 核心搜索 p95（200 次） | 3.399 ms | <= 150 ms | 通过 |
+| 预热 MCP 搜索 p95（40 次） | 9.354 ms | <= 500 ms | 通过 |
+| STDIO 启动并完成 `tools/list`（3 次中位数） | 651.804 ms | <= 1000 ms | 通过 |
 | `doctor` 精确计数 | 10,000 / 10,000 | 相等 | 通过 |
 
-补充测量：三次独立的 STDIO 冷启动为 789.202、753.177、768.602 ms；完整重建
-10,000 条索引用时 467.302 ms，核心首次搜索 6.578 ms。
+2026-09-20 补充测量：三次独立的 STDIO 冷启动为 674.432、651.804、631.790 ms；完整
+重建 10,000 条索引用时 381.286 ms，核心首次搜索 4.512 ms。
 
 使用 Python `-X importtime` 诊断确认，约 1.45 秒主要消耗在 MCP SDK 2.1.1 顶层
 便利包对客户端、HTTP、认证和遥测依赖的提前导入。当前 STDIO 专用进程改为只加载
@@ -131,6 +138,44 @@ GitHub 共享 Runner 曾在同一提交的首次执行中同时出现重建索�
 1000 ms 门槛，并在报告中保留全部样本。新增回归分别证明：一个异常高值不会误判，而
 三个样本中多数超过门槛时仍会失败；阈值本身没有降低。
 
+## Loop、导入闸门与外接 worker 验收
+
+执行命令：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 scripts\run_loop_acceptance.py `
+  --output .context-hub-test-data\loop-acceptance-v0.2.json
+```
+
+2026-09-20 结果：退出码 0，`ok=true`、`synthetic_only=true`，2 个合成项目和全部
+14 项检查通过。Loop 先同步，再读取有界状态，每轮最多执行一个安全动作；索引新鲜后
+自动创建只含权威文件的备份，下一轮进入 ready。遥测默认关闭，启用后也不记录查询、
+正文或本地路径。
+
+真实导入仍未执行。`import-plan --dry-run` 不改变状态，`approve-import` 只接受同一根目录
+和完全相同的文件快照；每次批准及最终注册前必须重新生成或校验当前计划，根目录、ctime、
+mtime、大小或内容任一变化都会导致哈希不同并拒绝旧计划。备份恢复到新的数据根后自动
+重建派生索引并通过 `doctor`。
+
+外接 Pi/DeepSeek 策略的配置上限为 1,000,000 总 token、最多 3 次尝试、最多 65,536
+输出字符和 3,600 秒墙钟时间。边界值 1,000,000 被接受，第 4 次尝试被拒绝，超长输出
+会截断并记录；即使 worker 把超时结果误报为 `completed`，3,600 秒后的记录也会被 Loop
+标记为需要人工检查。真实外接规划任务的提供方曾报告 1,006,464 token；这证明提供方计数可能
+越过请求预算，因此 Context Hub 将其记录为 `overshoot`，不将“请求上限”误写成提供方
+绝对硬截断保证。
+
+## 带鉴权的外部 HTTP MCP 验收
+
+2026-09-20 使用临时随机 Bearer 凭据启动真实 Streamable HTTP 进程，官方 MCP 客户端
+完成 `initialize → tools/list → manifest → search → read`。报告 `ok=true`，只暴露
+`context_get`，协议版本为 `2025-11-25`，固定 ref、正文哈希、项目范围与合成 marker
+全部匹配；三个调用分别返回唯一 `request_id`，并明确显示 `transport=streamable-http`、
+`freshness=current`、`sync_action=throttled`、`classification=synthetic`。
+
+自动化回归另外证明：未携带或携带错误 Bearer 时返回 401；公网绑定若缺少授权开关、
+凭据或 TLS 会在启动前失败。临时凭据没有写入报告或仓库，验收服务退出后即失效。生产
+外部调用应置于 HTTPS 反向代理后，或为服务直接配置证书与密钥。
+
 ## ChatGPT Web 与 outputSchema 补充验收
 
 2026-09-08，用户在 ChatGPT Web 完成了临时纯合成连接器的创建与真实调用。服务端访问
@@ -142,10 +187,10 @@ GitHub 共享 Runner 曾在同一提交的首次执行中同时出现重建索�
 1. STDIO 与 HTTP 共享 `context_get`/`context_put` 的紧凑输出契约。
 2. `tools/list` 明确暴露 `outputSchema`，成功调用返回与其匹配的 `structuredContent`，并
    保留文本 JSON 兼容返回。
-3. 本地真实 STDIO、真实 Streamable HTTP 和公网 HTTPS 会话均完成
+3. 本地真实 STDIO、真实 Streamable HTTP 和历史公网 HTTPS 会话均完成
    `initialize → tools/list → manifest → search → read`；公网协议版本为 `2025-11-25`，
    `context_get_output_schema_declared=true`。
-4. 完整回归 33/33 通过，用时 17.352 秒；临时公网端点随后关闭，不保留真实记忆或长期
+4. 当轮完整回归 33/33 通过，用时 17.352 秒；临时公网端点随后关闭，不保留真实记忆或长期
    可访问入口。
 
 Web 界面是在修复前报告该建议，因此“建议是否消失”没有被 UI 再次扫描确认；这是显示层
@@ -158,18 +203,20 @@ Web 界面是在修复前报告该建议，因此“建议是否消失”没有�
 `desktop-e2e`，并显式设置 `CONTEXT_HUB_WRITE_ENABLED=0`。`codex mcp get context-hub
 --json` 返回 `enabled=true`、`transport.type=stdio`，且环境参数与预期一致。
 
-`scripts/verify_desktop_stdio.py` 连续启动 5 个全新进程，每个进程都完成官方 SDK 的
+`scripts/verify_desktop_stdio.py` 于 2026-09-20 再次连续启动 5 个全新进程，每个进程都完成官方 SDK 的
 `initialize → tools/list → manifest → search → read`。5 次均只暴露 `context_get`，
 `outputSchema` 存在，调用标记为 `active=true`、`status=invoked`、`server=context-hub`、
-`transport=stdio`；稳定 ref 和 SHA-256 全部一致。三批各 5 个全新进程均通过；全链路
-中位数分别为 644.357、1039.130、861.566 ms，各批最大值分别为 789.187、1153.436、
-982.140 ms。v1.1 的 1000 ms 门槛只约束冷启动加 `tools/list`；对应 3 个新进程中位数为
-922.855 ms，仍通过。完整 `manifest → search → read` 链路不套用该冷启动门槛。
+`transport=stdio`；稳定 ref 和 SHA-256 全部一致，同时明确返回新鲜度、同步动作与
+`classification=synthetic`。本轮完整全链路中位数为 745.052 ms，范围为
+713.497–914.021 ms。v1.1 的 1000 ms 门槛只约束冷启动加 `tools/list`；本轮性能验收中
+对应 3 个新进程中位数为 651.804 ms，仍通过。完整 `manifest → search → read` 链路不
+套用该冷启动门槛。
 
 ## 未覆盖与下一验收点
 
 - Desktop 必须完全重启后在新对话执行 `/mcp`，再发送运行手册中的固定提示并核对正文、
-  调用标记和 SHA-256；这是剩余的唯一产品界面人工验收。
+  调用标记、`freshness`、`sync_action`、`classification` 和 SHA-256；这是剩余的唯一
+  产品界面人工验收。
 - 配置可见、SDK 通过和 Web 已通过都不能替代这次 Desktop UI 真实调用。
 - UI 通过前继续保持纯合成、只读数据根；通过后也只有在用户明确授权真实来源路径、项目
   ID 与排除项后，才进入独立数据根的备份、注册、重建、隔离和隐私验收。
