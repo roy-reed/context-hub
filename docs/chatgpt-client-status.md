@@ -1,6 +1,6 @@
 # ChatGPT 客户端接入状态
 
-状态日期：2026-09-08。
+状态日期：2026-09-13。
 
 ## 已确认
 
@@ -11,7 +11,12 @@
 - `context_get` 与可选的 `context_put` 现在都在 `tools/list` 中声明紧凑的
   `outputSchema`，成功调用同时返回匹配的 `structuredContent` 和兼容的文本 JSON。
 - HTTP 响应带 `context_hub.active=true`、实际 transport、请求 ID 和有界来源摘要，
-  可据此区分 Context Hub 命中与普通模型回答。
+  以及 `freshness`、`sync_action`、`classification`，可据此区分 Context Hub 命中、同步
+  状态与普通模型回答。
+- HTTP 外部调用已增加 Bearer 认证和安全启动门禁：非回环监听需要显式确认、环境变量
+  token，以及直接 TLS 或可信 TLS 反向代理声明；未认证请求返回 401。
+- 日常 Loop 已覆盖同步节流、只读状态、单步安全修复、导入计划快照、纯合成评测、备份
+  恢复和外接 worker 有界记录；这些操作不会自行导入真实记忆。
 - 首轮测试数据全部即时生成在临时目录，没有注册或导入既有记忆。
 - 本机 ChatGPT Desktop 共用 MCP 配置已注册 `context-hub` STDIO，数据根固定到纯合成
   `desktop-e2e`，并显式设置 `CONTEXT_HUB_WRITE_ENABLED=0`。
@@ -38,7 +43,9 @@ OpenAI 当前 MCP 配置文档说明：ChatGPT Desktop、Codex CLI 与 IDE 扩�
   “蓝色纸鸢已完成校准”，完整内容 SHA-256 为
   `2ed2db74bec2c00f220bda0ca851ec1a14e9f2f6c06ced970216f9a0a82deac4`。
 - 调用返回 `context_hub.active=true`、`status=invoked`、
-  `transport=streamable-http`、唯一请求 ID 和精确项目/来源摘要。
+  `transport=streamable-http`、唯一请求 ID 和精确项目/来源摘要。v0.2 新增的 freshness、
+  sync action 和 classification 由本地真实 HTTP/STDIO 回归覆盖；当时的 Web 截图不追溯
+  推断这些新增字段。
 - 网页端同时提示建议补充 `outputSchema`。该提示暴露的是工具结果契约缺口，不影响本次
   调用是否成功；现已修复，并由真实 STDIO、真实 HTTP 会话及公网 HTTPS 端点自动复验。
 - 临时端点只承载上述合成数据；复验结束后关闭，历史 URL 不再有效。修复后的网页界面
@@ -61,7 +68,7 @@ Business 仅管理员/所有者可启用和部署；Enterprise/Edu 还可能受 
 `context_get`。
 
 除 Desktop 完全重启、执行 `/mcp` 和发送一条固定验收提示外，其余配置、协议、检索、
-分页、哈希、来源提示与重复启动均由自动化验收承担。实际执行结果会写入验收报告；
+分页、哈希、同步/来源提示、HTTP 认证与重复启动均由自动化验收承担。实际执行结果会写入验收报告；
 未完成产品侧调用时必须明确标为“待人工确认”，不得根据配置或 SDK 结果推断通过。
 本轮 Web 产品侧调用已由用户确认完成；Desktop 自动化基线通过，UI 真实调用仍待人工
 确认。通过前不导入真实记忆。

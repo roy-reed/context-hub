@@ -38,6 +38,9 @@ jobs:
       - name: Run unit and protocol tests
         run: python -X utf8 -m unittest discover -s tests -v
 
+      - name: Run synthetic Loop delivery acceptance
+        run: python -X utf8 scripts/run_loop_acceptance.py
+
       - name: Run synthetic multi-project STDIO acceptance
         run: python -X utf8 scripts/run_multiproject_acceptance.py
 

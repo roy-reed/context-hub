@@ -1,4 +1,4 @@
-# Context Hub MVP 运行手册
+# Context Hub v0.2 运行手册
 
 ## 1. 边界与前提
 
@@ -9,6 +9,8 @@
   聊天导出、浏览器资料或个人目录。
 - JSONL 与明确注册的 Markdown 是事实源；`index/context.sqlite3` 可随时删除重建。
 - 默认只读。只有显式启用后，MCP 才会注册 `context_put`。
+- 默认分类为 `synthetic`，遥测关闭；真实来源只有经过逐文件预检和精确快照批准后才可
+  进入后续人工注册步骤。
 
 ## 2. 安装与合成数据初始化
 
@@ -81,7 +83,29 @@ while ($Page.truncated) {
 
 越界路径、越界符号链接、敏感证书后缀和常见浏览器数据目录会被拒绝。
 
-## 4. 显式写模式
+## 4. 日常 Loop
+
+日常启动或排障时先读取有界状态，再让协调器选择一个确定性动作：
+
+```powershell
+.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData status --quick
+.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData sync
+.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData loop-check
+.\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData loop-check --apply-safe
+```
+
+- `sync` 在事实源未变化且距上次同步少于 300 秒时返回 `throttled`；`--force` 跳过节流，
+  `--full` 从事实源完整重建派生索引。
+- `status --quick` 只返回计数、freshness、备份年龄、导入闸门和 worker 状态，不返回正文、
+  查询词或本地绝对路径。
+- `loop-check` 每次只选择一个动作，优先顺序为修复索引、同步、审查真实导入、检查失败
+  worker、备份、ready。`--apply-safe` 最多执行一次本地重建、同步或备份，不会批准导入、
+  调用外部 worker 或开启写模式。
+- 每次 MCP `context_get` 前会执行同一有节流同步，因此外部 Markdown 变化不再依赖手工
+  `reindex`；响应中的 `freshness` 和 `sync_action` 会说明本次读取看到的状态。
+- `state/loop.json` 只保存有界运行元数据；它不是事实源，也不会进入权威备份。
+
+## 5. 显式写模式
 
 持久启用写工具是安全边界变更；仅在用户明确要求后执行：
 
@@ -104,7 +128,7 @@ CLI 写入还要求 `--confirm-write`，并必须给出可追溯的 `--source-re
 `write_enabled` 改为 `false`，随后运行 `doctor`。不要设置
 `CONTEXT_HUB_WRITE_ENABLED`；该环境变量会临时强制显示写工具。
 
-## 5. ChatGPT Desktop、MCP STDIO 与 Streamable HTTP
+## 6. ChatGPT Desktop、MCP STDIO 与 Streamable HTTP
 
 ChatGPT Desktop、Codex CLI 与 IDE 扩展在同一 Codex 主机上共用 MCP 配置。Desktop
 可直接启动本地 STDIO 服务器，不需要公网 URL 或隧道。先用绝对路径注册只读、纯合成
@@ -145,7 +169,8 @@ Desktop 产品侧只保留一次必要人工验收。在重启后的新对话中
 > 只使用 context-hub 的 context_get，按 manifest → search → read 顺序，在
 > project_id=desktop-e2e 中搜索 chatgpt-http-e2e-7f3a91，读取首个稳定 ref 的完整内容；
 > 最后原样列出 context_hub.active、status、server、transport、operation、request_id、
-> source_types、project_ids 和 sha256。不要根据已有对话回答。
+> source_types、project_ids、freshness、sync_action、classification 和 sha256。不要根据已有
+> 对话回答。
 
 预期正文含“蓝色纸鸢已完成校准”，`transport=stdio`、`project_ids=["desktop-e2e"]`，
 完整内容 SHA-256 为
@@ -162,23 +187,57 @@ $HttpCommand = (Resolve-Path '.\.venv\Scripts\context-hub-mcp-http.exe').Path
 & $HttpCommand --data-dir $ContextHubTestData --host 127.0.0.1 --port 8765 --path /mcp
 ```
 
+本机也可启用 Bearer 认证。令牌只放在环境变量中，至少 32 个字符；不要把令牌作为命令
+参数、写入仓库或验收报告。先在终端 A 输入一个临时令牌并保持服务运行：
+
+```powershell
+$env:CONTEXT_HUB_HTTP_BEARER_TOKEN = Read-Host '输入短时随机 Bearer token'
+& $HttpCommand --data-dir $ContextHubTestData --host 127.0.0.1 --port 8765 --path /mcp
+```
+
+再在终端 B 输入同一个临时令牌并执行验证；验证后停止终端 A 的服务，并在两个终端中
+删除该环境变量：
+
+```powershell
+$env:CONTEXT_HUB_HTTP_BEARER_TOKEN = Read-Host '再次输入同一短时随机 Bearer token'
+.\.venv\Scripts\python.exe -X utf8 scripts\verify_http_mcp.py `
+  --url http://127.0.0.1:8765/mcp `
+  --query chatgpt-http-e2e-7f3a91 `
+  --project-id desktop-e2e `
+  --expected-marker chatgpt-http-e2e-7f3a91
+Remove-Item Env:CONTEXT_HUB_HTTP_BEARER_TOKEN
+```
+
+非回环直连必须同时满足显式公网绑定、Bearer 认证和 TLS：
+
+```powershell
+& $HttpCommand --data-dir $ContextHubTestData --host 0.0.0.0 --port 8765 --path /mcp `
+  --allow-public-bind --tls-cert C:\path\server.crt --tls-key C:\path\server.key `
+  --allowed-host 'mcp.example.com:*' --allowed-origin https://chatgpt.com
+```
+
+若 TLS 由同机可信反向代理终止，Context Hub 应继续监听回环地址。只有网络拓扑确实要求
+监听非回环地址时，才可用 `--allow-insecure-http` 明确表示“代理后方的明文内网跳”；它不
+会关闭 Bearer、Host、Origin 或请求体保护，也不等于允许直接公网明文 HTTP。
+
 ChatGPT Web 接入需要把 `http://127.0.0.1:8765/mcp` 通过受控隧道或反向代理暴露为
 可访问的 HTTPS URL，然后在 ChatGPT Web 的 Apps 开发者模式中添加该 URL。Desktop
 本机日常使用应优先采用前述 STDIO 配置，避免隧道启动、外部暴露和额外网络延迟。
-代理与 Context Hub 在同机时应继续只监听回环地址；只有明确需要监听非回环接口时才用
-`--allow-public-bind`。若代理保留外部 Host，使用 `--allowed-host` 精确加入该主机名；
-不得使用宽泛通配或把真实记忆暴露在无认证入口。临时验收只用纯合成数据，完成后关闭
+代理与 Context Hub 在同机时应继续只监听回环地址；若代理保留外部 Host，使用
+`--allowed-host` 精确加入该主机名，并以 `--allowed-origin` 精确限定浏览器来源；不得使用
+宽泛通配。当前外部入口只允许只读、纯合成数据，完成后关闭
 隧道；临时隧道停止后原 URL 即失效，不得复用历史报告中的 URL。完整产品侧步骤和当前
 实测状态见
 [`docs/chatgpt-client-status.md`](docs/chatgpt-client-status.md)。
 
 每次工具结果都包含 `context_hub` 标记，其中 `active`、`status`、`server`、
 `transport`、`operation`、`request_id`、`source_count`、`source_types` 和 `project_ids`
-用于判断请求是否确实经过 Context Hub，以及结果来自哪些事实源；它不暴露正文或本地
-绝对路径。成功调用的 `structuredContent` 必须匹配 `tools/list` 中对应的
+用于判断请求是否确实经过 Context Hub，以及结果来自哪些事实源；`freshness`、
+`sync_action` 和 `classification` 用于确认同步与数据分类。标记不暴露正文或本地绝对
+路径。成功调用的 `structuredContent` 必须匹配 `tools/list` 中对应的
 `outputSchema`；同时保留等价文本 JSON，以兼容尚未消费结构化结果的客户端。
 
-## 6. 诊断、重建与恢复
+## 7. 诊断、重建与恢复
 
 ```powershell
 .\.venv\Scripts\context-hub.exe --data-dir $ContextHubTestData doctor
@@ -196,18 +255,21 @@ $RestoreRoot = Join-Path $ManualRoot 'restored'
 - 索引缺失、损坏或写入返回 `status="persisted", index_state="pending_reindex"` 时，运行
   `doctor --reindex`；JSONL 中已落盘的事件无需重写。
 - 备份 ZIP 只包含 `config.toml`、`manifest.json`、`memory/events.jsonl` 和逐文件
-  SHA-256 清单，不复制注册项目中的外部 Markdown。
+  SHA-256 清单，不复制注册项目中的外部 Markdown，也不复制派生的 `state/loop.json`。
 - `restore` 只接受不存在的新数据根目录；它在同级临时目录中检查成员集合、路径、类型、
   大小、压缩比和逐文件 SHA-256，再自动重建索引并通过 `doctor` 后原子落位。任何校验
   失败都不会创建目标目录。
 - 清单中的注册项目只保存路径，不复制项目 Markdown；外部项目路径必须仍然存在，否则
   先恢复项目文件。
+- 恢复后会关闭此前的真实导入批准状态，必须针对当前文件内容重新生成并批准计划。
 
-## 7. 验收卡
+## 8. 验收卡
 
 ```powershell
 pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -X utf8 scripts\run_loop_acceptance.py `
+  --output .context-hub-test-data\loop-acceptance-report.json
 .\.venv\Scripts\python.exe -X utf8 scripts\run_multiproject_acceptance.py `
   --output .context-hub-test-data\multiproject-report.json
 .\.venv\Scripts\python.exe -X utf8 scripts\run_acceptance.py `
@@ -229,8 +291,12 @@ pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
 8. 客户端实测的产品名称、版本、接入方式、`tools/list`（含 `outputSchema`）、
    search/read、哈希和 `context_hub.transport` 结果。
 9. 截图或配置存在不能替代真实 MCP 调用；未执行的客户端验收必须标为未验证。
+10. Loop 报告必须证明同步、单步安全动作、两项目评测、真实导入快照、1,000,000 token
+    边界、输出截断元数据、权威备份恢复和默认关闭遥测全部通过。
+11. 外部 HTTP 验收必须证明未认证请求被拒绝、带认证的官方 MCP 客户端可完成
+    `manifest → search → read`，且非回环启动缺少认证或 TLS/可信代理确认时拒绝启动。
 
-## 8. 真实记忆导入闸门
+## 9. 真实记忆导入闸门
 
 在以下条件全部满足前，不读取、注册或导入真实记忆：
 
@@ -241,7 +307,28 @@ pwsh -NoLogo -NoProfile -File .\scripts\run_runbook_smoke.ps1
    `CONTEXT_HUB_WRITE_ENABLED=0`，数据根配置中 `write_enabled=false`。
 4. 手册冒烟、完整回归、多项目隔离、备份恢复和重建索引检查全部通过。
 
-闸门通过后，先由用户明确授权真实来源根目录、项目 ID 和排除项，再在独立的新数据根中
+闸门通过后，先由用户明确授权真实来源根目录、项目 ID、逐文件允许列表和排除项。在任何
+注册前生成不写入状态的逐文件计划：
+
+```powershell
+.\.venv\Scripts\context-hub.exe --data-dir $NewRealDataRoot import-plan `
+  <project-id> <authorized-root> --file AGENTS.md --file context\approved.md `
+  --classification real --dry-run
+```
+
+人工核对计划中的相对路径、大小、`mtime_ns`、`ctime_ns`、SHA-256 和 `plan_hash` 后，
+才可对完全相同的根目录与文件快照批准：
+
+```powershell
+.\.venv\Scripts\context-hub.exe --data-dir $NewRealDataRoot approve-import `
+  <plan-hash> <project-id> <authorized-root> `
+  --file AGENTS.md --file context\approved.md --classification real --confirm-approval
+```
+
+`import-plan` 和 `approve-import` 都不会读取正文到报告、复制文件或执行
+`register-project`。每次批准以及最终注册前都必须重新生成并核对当前计划；根目录、文件
+元数据或内容变化会产生不同的 `plan_hash`，旧计划不能通过重新校验。最终注册仍需用户
+针对该精确快照单独授权。获得授权后，再在独立的新数据根中
 分阶段注册；不要覆盖当前纯合成根。先备份 Context Hub 权威文件，并另行备份被注册的
 外部 Markdown（Context Hub 备份不会复制外部项目文件）；随后执行 `reindex`、`doctor`、
 项目隔离查询和敏感路径反向测试。只有验收报告通过后，才把 Desktop MCP 条目切换到真实

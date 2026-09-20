@@ -1,4 +1,4 @@
-# Context Hub MVP v1.1 实现契约
+# Context Hub v0.2 实现契约（基于 v1.1 规格）
 
 ## 固定边界
 
@@ -12,8 +12,13 @@
   可完全重建的派生索引。
 - 默认只读；写入必须由显式启用的写模式和 `context_put` 调用共同触发。
 - MCP 只提供 `context_get`，以及在写模式下才注册的 `context_put`。
-- 不引入本地模型、向量库、文件监视器或容器。HTTP 默认只监听回环地址；公网 HTTPS
-  只允许作为纯合成、短时且可关闭的客户端验收入口，导入真实记忆前必须使用认证入口。
+- 不引入本地模型、向量库、常驻文件监视器或容器。读取前以指纹和最短间隔执行有节流
+  同步，避免长期运行索引悄然过期。
+- HTTP 默认只监听回环地址。非回环监听必须显式确认、使用至少 32 字符的环境变量 Bearer
+  token，并配置直接 TLS 或明确声明位于可信 TLS 反向代理之后；Host、Origin 和请求体
+  上限继续生效。
+- 真实记忆导入默认关闭。预检和批准只锁定允许列表、大小、mtime、ctime 与 SHA-256
+  快照，不自动注册、复制或索引真实来源。
 
 ## 最小评测契约
 
@@ -36,6 +41,16 @@
     Host 防护；每个响应包含 transport、request ID 和有界来源摘要。
 12. 备份只含 3 个权威源文件；恢复必须先校验成员、大小、压缩比和 SHA-256，再在新
     目录重建索引，校验失败不得留下目标目录或不完整事实源。
+13. `sync` 在事实源不变时可节流；事实源变化必须同步。`loop-check --apply-safe` 每次最多
+    执行一个本地同步、重建或备份动作，永不批准导入、开启写入或调用外部模型。
+14. `context_get` 的每次响应都包含 `freshness`、`sync_action` 和 `classification`，且同步
+    元数据不得包含正文、查询词、凭据或绝对路径。
+15. 两个纯合成项目的固定 Loop 评测必须 Top-1/Top-3 全部命中；默认遥测关闭，启用时也
+    只能写入有界的计数、耗时和散列标识。
+16. 真实导入计划必须是只读 dry-run；只有相同项目 ID、根目录、逐文件允许列表、分类、
+    大小、mtime、ctime 和 SHA-256 可匹配批准，任一文件或元数据变化都会拒绝旧计划。
+17. 外部 worker 接受的任务预算最大为 1,000,000 tokens、最多 3 次尝试、最终文本最多
+    65,536 字符、默认共享墙钟 3600 秒；提供商回报超限后立即停止并不得继续重试。
 
 既有正确案例：
 
@@ -52,12 +67,14 @@
 - 任何索引均可由事实源独立重建。
 - `context_get` 默认响应保持紧凑；正文必须通过稳定引用分页读取。
 - 状态与来源提示只公开类型、数量和项目 ID，不新增绝对路径、正文或凭据泄露面。
+- 外部 HTTP token 只从命名环境变量读取，不接受命令行明文，也不进入报告。
 
 验收证据：
 
 ```text
 pwsh -NoLogo -NoProfile -File scripts/run_runbook_smoke.ps1
 python -X utf8 -m unittest discover -s tests -v
+python -X utf8 scripts/run_loop_acceptance.py
 python -X utf8 scripts/run_multiproject_acceptance.py
 python -X utf8 scripts/run_acceptance.py
 context-hub --data-dir <synthetic-temp-dir> doctor

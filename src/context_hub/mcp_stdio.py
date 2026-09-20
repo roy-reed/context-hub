@@ -12,7 +12,9 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from . import __version__
 from .hub import ContextHub
+from .loop import LoopCoordinator
 from .mcp_contracts import CONTEXT_GET_OUTPUT_SCHEMA, CONTEXT_PUT_OUTPUT_SCHEMA
 
 
@@ -94,8 +96,8 @@ INSTRUCTIONS = (
     "limit=3 and max_chars=600, then read a stable ref only when the original text is needed. Ignore "
     "superseded records unless history was explicitly requested. Call context_put only after the user "
     "explicitly asks for or confirms that exact write. Writes are hidden unless enabled. Every tool "
-    "response includes context_hub.status, transport, request_id, and a bounded source summary so the "
-    "client can show that Context Hub actually ran."
+    "response includes context_hub.status, transport, request_id, freshness, sync_action, "
+    "classification, and a bounded source summary so the client can show that Context Hub actually ran."
 )
 KINDS = {"preference", "decision", "constraint", "fact", "status"}
 
@@ -195,6 +197,7 @@ class ContextHubMCPServer:
     def __init__(self, hub: ContextHub, *, writes: bool, transport: str = "stdio") -> None:
         _load_mcp_runtime(fast_startup=False)
         self.hub = hub
+        self.loop = LoopCoordinator(hub)
         self.writes = writes
         self.transport = transport
         self.instructions = INSTRUCTIONS
@@ -233,16 +236,21 @@ class ContextHubMCPServer:
                 raise ValueError("tool arguments must be an object")
             if name == "context_get":
                 operation = str(values.get("op", name))
+                sync_result = self.loop.sync()
                 payload = self._context_get(values)
                 payload["context_hub"] = self._invocation_marker(
                     payload,
                     operation=operation,
                     request_id=request_id,
+                    freshness=sync_result["freshness"],
+                    sync_action=sync_result["action"],
+                    classification=sync_result["classification"],
                 )
                 return _json_result(payload)
             if name == "context_put" and self.writes:
                 operation = str(values.get("action", name))
                 payload = self._context_put(values)
+                status = self.loop.quick_status()
                 payload["context_hub"] = self._invocation_marker(
                     payload,
                     operation=operation,
@@ -250,6 +258,9 @@ class ContextHubMCPServer:
                     source_types={"mcp"},
                     project_ids={values["project_id"]} if values.get("project_id") else set(),
                     source_count=1,
+                    freshness=status["freshness"],
+                    sync_action="write_index_update",
+                    classification=status["classification"],
                 )
                 return _json_result(payload)
             raise ValueError(f"Unknown tool: {name}")
@@ -272,6 +283,9 @@ class ContextHubMCPServer:
         source_types: set[str] | None = None,
         project_ids: set[str] | None = None,
         source_count: int | None = None,
+        freshness: str = "unknown",
+        sync_action: str = "not_checked",
+        classification: str = "unknown",
     ) -> dict[str, Any]:
         """Return a small, client-visible proof that this adapter handled a call."""
         derived_source_types = set(source_types or ())
@@ -320,6 +334,9 @@ class ContextHubMCPServer:
             "source_count": count,
             "source_types": sorted(derived_source_types),
             "project_ids": sorted(derived_project_ids),
+            "freshness": freshness,
+            "sync_action": sync_action,
+            "classification": classification,
         }
 
     def _context_get(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -416,7 +433,7 @@ class ContextHubMCPServer:
                     server_info=mcp_types.Implementation(
                         name="context-hub",
                         title="Context Hub",
-                        version="0.1.0",
+                        version=__version__,
                         description="Local-first retrieval over explicit JSONL and Markdown fact sources.",
                     ),
                     instructions=self.instructions,

@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "context-hub"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first context store with STDIO and Streamable HTTP MCP adapters"
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "mcp==2.1.1",
+  "uvicorn==0.52.4",
 ]
 
 [project.scripts]

@@ -9,18 +9,43 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from context_hub import ContextHub
-from context_hub.mcp_http import build_http_server
+from context_hub.mcp_http import (
+    DEFAULT_AUTH_TOKEN_ENV,
+    _runtime_security,
+    build_http_server,
+    build_parser,
+)
 from context_hub.mcp_contracts import CONTEXT_GET_OUTPUT_SCHEMA, CONTEXT_PUT_OUTPUT_SCHEMA
 from context_hub.mcp_stdio import build_server
 
 
 class MCPContractTest(unittest.IsolatedAsyncioTestCase):
+    def _assert_marker_schema_complete(self, schema: dict[str, object]) -> None:
+        marker = schema["properties"]["context_hub"]
+        self.assertEqual(marker["properties"]["active"], {"const": True})
+        self.assertTrue(
+            {
+                "active",
+                "status",
+                "transport",
+                "request_id",
+                "source_count",
+                "source_types",
+                "project_ids",
+                "freshness",
+                "sync_action",
+                "classification",
+            }.issubset(marker["required"])
+        )
+
     def test_library_import_preserves_the_public_mcp_package(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
         script = (
@@ -58,6 +83,7 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
             tools = await readonly.list_tools()
             self.assertEqual([tool.name for tool in tools], ["context_get"])
             self.assertEqual(tools[0].output_schema, CONTEXT_GET_OUTPUT_SCHEMA)
+            self._assert_marker_schema_complete(tools[0].output_schema)
             schema_bytes = len(
                 json.dumps(
                     [tool.model_dump(mode="json", by_alias=True) for tool in tools],
@@ -76,6 +102,8 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([tool.name for tool in writable_tools], ["context_get", "context_put"])
             self.assertEqual(writable_tools[0].output_schema, CONTEXT_GET_OUTPUT_SCHEMA)
             self.assertEqual(writable_tools[1].output_schema, CONTEXT_PUT_OUTPUT_SCHEMA)
+            self._assert_marker_schema_complete(writable_tools[0].output_schema)
+            self._assert_marker_schema_complete(writable_tools[1].output_schema)
             writable_schema_bytes = len(
                 json.dumps(
                     [tool.model_dump(mode="json", by_alias=True) for tool in writable_tools],
@@ -173,6 +201,9 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(marker["transport"], "stdio")
                     self.assertEqual(marker["source_count"], 1)
                     self.assertEqual(marker["source_types"], ["test"])
+                    self.assertEqual(marker["freshness"], "current")
+                    self.assertIn(marker["sync_action"], {"synchronized", "throttled"})
+                    self.assertEqual(marker["classification"], "synthetic")
                     self.assertRegex(marker["request_id"], r"^ch_[0-9a-f]{12}$")
 
     async def test_real_streamable_http_session_and_transport_guards(self) -> None:
@@ -239,6 +270,8 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(marker["source_count"], 1)
                         self.assertEqual(marker["source_types"], ["test"])
                         self.assertEqual(marker["project_ids"], [])
+                        self.assertEqual(marker["freshness"], "current")
+                        self.assertEqual(marker["classification"], "synthetic")
 
                 def send_bad_host() -> int:
                     import http.client
@@ -254,6 +287,110 @@ class MCPContractTest(unittest.IsolatedAsyncioTestCase):
                     return status
 
                 self.assertEqual(await asyncio.to_thread(send_bad_host), 421)
+            finally:
+                process.terminate()
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=5)
+
+    async def test_bearer_protected_http_session_and_public_bind_guards(self) -> None:
+        token = "synthetic-context-hub-test-token-000000000000"
+        parser = build_parser()
+        with patch.dict(os.environ, {DEFAULT_AUTH_TOKEN_ENV: ""}, clear=False):
+            args = parser.parse_args(
+                ["--host", "0.0.0.0", "--allow-public-bind", "--allow-insecure-http"]
+            )
+            with self.assertRaisesRegex(SystemExit, "requires a bearer token"):
+                _runtime_security(args)
+        with patch.dict(os.environ, {DEFAULT_AUTH_TOKEN_ENV: token}, clear=False):
+            args = parser.parse_args(["--host", "0.0.0.0", "--allow-public-bind"])
+            with self.assertRaisesRegex(SystemExit, "requires --tls-cert"):
+                _runtime_security(args)
+            args = parser.parse_args(
+                ["--host", "0.0.0.0", "--allow-public-bind", "--allow-insecure-http"]
+            )
+            self.assertEqual(_runtime_security(args)[0], token)
+
+        with tempfile.TemporaryDirectory(prefix="context-hub-mcp-auth-") as temporary:
+            hub = ContextHub(temporary)
+            hub.initialize()
+            hub.put(
+                action="append",
+                kind="fact",
+                content="受保护HTTP合成样本",
+                source_type="test",
+                source_ref="synthetic:http-auth",
+                confirmed=True,
+            )
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            environment = os.environ.copy()
+            environment["CONTEXT_HUB_TEST_BEARER"] = token
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "context_hub.mcp_http",
+                    "--data-dir",
+                    temporary,
+                    "--port",
+                    str(port),
+                    "--auth-token-env",
+                    "CONTEXT_HUB_TEST_BEARER",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                for _ in range(100):
+                    if process.poll() is not None:
+                        stdout, stderr = process.communicate(timeout=2)
+                        self.fail(f"authenticated HTTP MCP exited early: {stdout}\n{stderr}")
+                    try:
+                        with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                            break
+                    except OSError:
+                        await asyncio.sleep(0.05)
+                else:
+                    self.fail("authenticated HTTP MCP did not accept connections")
+
+                def unauthenticated_status() -> int:
+                    import http.client
+
+                    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+                    connection.request("POST", "/mcp", body=b"{}", headers={"Content-Type": "application/json"})
+                    status = connection.getresponse().status
+                    connection.close()
+                    return status
+
+                self.assertEqual(await asyncio.to_thread(unauthenticated_status), 401)
+                client = create_mcp_http_client(
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+                async with client:
+                    async with streamable_http_client(
+                        f"http://127.0.0.1:{port}/mcp", http_client=client
+                    ) as streams:
+                        async with ClientSession(*streams) as session:
+                            await asyncio.wait_for(session.initialize(), timeout=10)
+                            result = await asyncio.wait_for(
+                                session.call_tool(
+                                    "context_get",
+                                    {"op": "search", "query": "受保护HTTP", "limit": 1},
+                                ),
+                                timeout=10,
+                            )
+                            self.assertFalse(result.is_error)
+                            self.assertEqual(
+                                result.structured_content["context_hub"]["transport"],
+                                "streamable-http",
+                            )
             finally:
                 process.terminate()
                 try:

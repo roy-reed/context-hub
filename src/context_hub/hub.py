@@ -177,7 +177,20 @@ class ContextHub:
 
         with ExclusiveFileLock(self.lock_path):
             if not self.config_path.exists():
-                config = f"schema_version = {SCHEMA_VERSION}\nwrite_enabled = {str(write_enabled).lower()}\n"
+                config = (
+                    f"schema_version = {SCHEMA_VERSION}\n"
+                    f"write_enabled = {str(write_enabled).lower()}\n"
+                    "\n"
+                    "[loop]\n"
+                    'classification = "synthetic"\n'
+                    "min_sync_interval_seconds = 300\n"
+                    "max_stale_seconds = 900\n"
+                    "max_backup_age_seconds = 3600\n"
+                    "\n"
+                    "[telemetry]\n"
+                    "enabled = false\n"
+                    "max_bytes = 1048576\n"
+                )
                 _atomic_write_text(self.config_path, config)
             elif write_enabled and not self.write_enabled:
                 config_text = self.config_path.read_text(encoding="utf-8")
