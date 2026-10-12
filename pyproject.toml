@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "context-hub"
 version = "0.2.0"
 description = "Local-first context store with STDIO and Streamable HTTP MCP adapters"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11,<3.14"
 dependencies = [
   "mcp==2.1.1",
   "uvicorn==0.52.4",
