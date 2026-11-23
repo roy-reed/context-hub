@@ -2,7 +2,7 @@
 
 ## 1. 边界与前提
 
-- 使用 Python 3.11；项目声明不接受 3.12 及以上版本。
+- 使用 Python 3.11 到 3.15（含）。当前锁文件已在 3.11–3.15 验证；不要使用 3.16 预发布版。
 - 默认数据目录是 `%LOCALAPPDATA%\ContextHub`，也可用 `--data-dir` 或
   `CONTEXT_HUB_DATA_DIR` 指向绝对路径。
 - 首轮只在临时或 `.context-hub-test-data` 目录使用合成数据。不要注册既有记忆、
